@@ -532,23 +532,325 @@ def pagina_resumen():
 
 # ============== PÁGINA: POR VEHÍCULO ==============
 
-def pagina_vehiculo():
-    """Vista de análisis por vehículo."""
-    st.markdown('<p class="main-header">🚛 Análisis por Vehículo</p>', unsafe_allow_html=True)
+def calcular_pnl_vehiculo(vehiculo_id: str = None) -> pd.DataFrame:
+    """
+    Calcula P&L mensual para un vehículo o todos.
+    Retorna DataFrame con columnas: mes, ingresos, gastos, neto
+    """
+    movimientos = get_movimientos(vehiculo_id=vehiculo_id) if vehiculo_id else get_movimientos()
 
-    vehiculos = get_vehiculos_operativos()
+    if len(movimientos) == 0:
+        return pd.DataFrame(columns=['mes', 'ingresos', 'gastos', 'neto'])
+
+    # Añadir columna de mes
+    movimientos['mes'] = pd.to_datetime(movimientos['fecha']).dt.strftime('%Y-%m')
+
+    # Calcular ingresos y gastos por mes
+    resumen = movimientos.groupby('mes').agg(
+        ingresos=('importe', lambda x: x[x > 0].sum()),
+        gastos=('importe', lambda x: x[x < 0].sum())
+    ).reset_index()
+
+    resumen['neto'] = resumen['ingresos'] + resumen['gastos']
+
+    # Ordenar por mes
+    resumen = resumen.sort_values('mes', ascending=False)
+
+    return resumen
+
+
+def mostrar_grafico_evolucion(df_pnl: pd.DataFrame, titulo: str = "Evolución Mensual"):
+    """Muestra gráfico de evolución de ingresos/gastos/neto."""
+    import plotly.graph_objects as go
+
+    if len(df_pnl) == 0:
+        st.info("No hay datos para mostrar el gráfico")
+        return
+
+    # Ordenar por mes ascendente para el gráfico
+    df_chart = df_pnl.sort_values('mes', ascending=True).copy()
+
+    fig = go.Figure()
+
+    # Ingresos (barras verdes)
+    fig.add_trace(go.Bar(
+        x=df_chart['mes'],
+        y=df_chart['ingresos'],
+        name='Ingresos',
+        marker_color='#28a745',
+        text=[formato_importe_es(v) for v in df_chart['ingresos']],
+        textposition='outside'
+    ))
+
+    # Gastos (barras rojas, valores absolutos)
+    fig.add_trace(go.Bar(
+        x=df_chart['mes'],
+        y=df_chart['gastos'].abs(),
+        name='Gastos',
+        marker_color='#dc3545',
+        text=[formato_importe_es(abs(v)) for v in df_chart['gastos']],
+        textposition='outside'
+    ))
+
+    # Neto (línea)
+    fig.add_trace(go.Scatter(
+        x=df_chart['mes'],
+        y=df_chart['neto'],
+        name='Neto',
+        mode='lines+markers+text',
+        line=dict(color='#1f4e79', width=3),
+        marker=dict(size=10),
+        text=[formato_importe_es(v) for v in df_chart['neto']],
+        textposition='top center'
+    ))
+
+    fig.update_layout(
+        title=titulo,
+        xaxis_title='Mes',
+        yaxis_title='Importe (€)',
+        barmode='group',
+        legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='right', x=1),
+        height=400,
+        template='plotly_white'
+    )
+
+    st.plotly_chart(fig, use_container_width=True)
+
+
+def mostrar_detalle_movimientos(vehiculo_id: str, mes: str):
+    """Muestra el detalle de movimientos para un vehículo y mes."""
+    movimientos = get_movimientos(vehiculo_id=vehiculo_id)
+
+    if len(movimientos) == 0:
+        st.info("No hay movimientos")
+        return
+
+    # Filtrar por mes
+    movimientos['mes'] = pd.to_datetime(movimientos['fecha']).dt.strftime('%Y-%m')
+    mov_mes = movimientos[movimientos['mes'] == mes].copy()
+
+    if len(mov_mes) == 0:
+        st.info(f"No hay movimientos en {mes}")
+        return
+
+    # Separar ingresos y gastos
+    ingresos = mov_mes[mov_mes['importe'] > 0].sort_values('fecha', ascending=False)
+    gastos = mov_mes[mov_mes['importe'] < 0].sort_values('fecha', ascending=False)
+
+    col_ing, col_gas = st.columns(2)
+
+    with col_ing:
+        st.markdown("##### 📈 Ingresos")
+        if len(ingresos) > 0:
+            for _, row in ingresos.iterrows():
+                st.markdown(f"**{row['fecha'][:10]}** - {row['categoria_nombre'] or row['categoria_id']}")
+                st.markdown(f"<span style='color:green'>{formato_importe_es(row['importe'])}</span> - {row['descripcion'][:40]}...", unsafe_allow_html=True)
+                st.markdown("---")
+        else:
+            st.caption("Sin ingresos")
+
+    with col_gas:
+        st.markdown("##### 📉 Gastos")
+        if len(gastos) > 0:
+            for _, row in gastos.iterrows():
+                st.markdown(f"**{row['fecha'][:10]}** - {row['categoria_nombre'] or row['categoria_id']}")
+                st.markdown(f"<span style='color:red'>{formato_importe_es(row['importe'])}</span> - {row['descripcion'][:40]}...", unsafe_allow_html=True)
+                st.markdown("---")
+        else:
+            st.caption("Sin gastos")
+
+
+def mostrar_tab_vehiculo(vehiculo_id: str, vehiculo_desc: str):
+    """Muestra el contenido de una pestaña de vehículo."""
+    st.markdown(f"### 🚛 {vehiculo_id} - {vehiculo_desc}")
+
+    # Calcular P&L
+    df_pnl = calcular_pnl_vehiculo(vehiculo_id)
+
+    if len(df_pnl) == 0:
+        st.info(f"No hay movimientos para {vehiculo_id}")
+        return
+
+    # Métricas totales del vehículo
+    total_ingresos = df_pnl['ingresos'].sum()
+    total_gastos = df_pnl['gastos'].sum()
+    total_neto = df_pnl['neto'].sum()
+
+    col_m1, col_m2, col_m3 = st.columns(3)
+    with col_m1:
+        st.metric("Total Ingresos", formato_importe_es(total_ingresos))
+    with col_m2:
+        st.metric("Total Gastos", formato_importe_es(abs(total_gastos)))
+    with col_m3:
+        delta_color = "normal" if total_neto >= 0 else "inverse"
+        st.metric("Resultado Neto", formato_importe_es(total_neto),
+                 delta=f"{(total_neto/total_ingresos*100):.1f}% margen" if total_ingresos > 0 else None,
+                 delta_color=delta_color)
+
+    st.markdown("---")
+
+    # Gráfico de evolución
+    mostrar_grafico_evolucion(df_pnl, f"Evolución Mensual - {vehiculo_id}")
+
+    st.markdown("---")
+
+    # Tabla P&L mensual
+    st.markdown("### 📊 Detalle Mensual")
+
+    # Formatear tabla
+    df_tabla = df_pnl.copy()
+    df_tabla['Mes'] = df_tabla['mes']
+    df_tabla['Ingresos'] = df_tabla['ingresos'].apply(formato_importe_es)
+    df_tabla['Gastos'] = df_tabla['gastos'].apply(lambda x: formato_importe_es(abs(x)))
+    df_tabla['Neto'] = df_tabla['neto'].apply(formato_importe_es)
+
+    st.dataframe(
+        df_tabla[['Mes', 'Ingresos', 'Gastos', 'Neto']],
+        use_container_width=True,
+        hide_index=True
+    )
+
+    # Selector de mes para ver detalle
+    st.markdown("---")
+    st.markdown("### 📋 Detalle de Apuntes")
+
+    meses_disponibles = df_pnl['mes'].tolist()
+    mes_sel = st.selectbox(
+        "Selecciona mes para ver detalle",
+        options=meses_disponibles,
+        key=f"mes_detalle_{vehiculo_id}"
+    )
+
+    if mes_sel:
+        with st.expander(f"Ver movimientos de {mes_sel}", expanded=True):
+            mostrar_detalle_movimientos(vehiculo_id, mes_sel)
+
+
+def mostrar_tab_totales():
+    """Muestra la pestaña de totales consolidados."""
+    st.markdown("### 📊 Totales Consolidados")
+
+    # Obtener todos los movimientos
+    movimientos = get_movimientos()
+
+    if len(movimientos) == 0:
+        st.info("No hay movimientos importados")
+        return
+
+    # Calcular P&L total
+    df_pnl_total = calcular_pnl_vehiculo(None)
+
+    # Métricas globales
+    total_ingresos = df_pnl_total['ingresos'].sum()
+    total_gastos = df_pnl_total['gastos'].sum()
+    total_neto = df_pnl_total['neto'].sum()
+
+    col_m1, col_m2, col_m3 = st.columns(3)
+    with col_m1:
+        st.metric("Total Ingresos", formato_importe_es(total_ingresos))
+    with col_m2:
+        st.metric("Total Gastos", formato_importe_es(abs(total_gastos)))
+    with col_m3:
+        delta_color = "normal" if total_neto >= 0 else "inverse"
+        st.metric("Resultado Neto", formato_importe_es(total_neto),
+                 delta=f"{(total_neto/total_ingresos*100):.1f}% margen" if total_ingresos > 0 else None,
+                 delta_color=delta_color)
+
+    st.markdown("---")
+
+    # Gráfico de evolución total
+    mostrar_grafico_evolucion(df_pnl_total, "Evolución Mensual - TOTAL FLOTA")
+
+    st.markdown("---")
+
+    # Resumen por vehículo
+    st.markdown("### 🚛 Resumen por Vehículo")
+
+    vehiculos = get_vehiculos()
+    resumen_vehiculos = []
+
+    for _, veh in vehiculos.iterrows():
+        df_veh = calcular_pnl_vehiculo(veh['id'])
+        if len(df_veh) > 0:
+            resumen_vehiculos.append({
+                'Vehículo': veh['id'],
+                'Descripción': veh['descripcion'],
+                'Ingresos': df_veh['ingresos'].sum(),
+                'Gastos': abs(df_veh['gastos'].sum()),
+                'Neto': df_veh['neto'].sum()
+            })
+
+    if resumen_vehiculos:
+        df_resumen = pd.DataFrame(resumen_vehiculos)
+
+        # Mostrar como métricas
+        cols = st.columns(len(resumen_vehiculos))
+        for i, row in enumerate(resumen_vehiculos):
+            with cols[i]:
+                color = "green" if row['Neto'] >= 0 else "red"
+                st.markdown(f"**{row['Vehículo']}**")
+                st.markdown(f"Ingresos: {formato_importe_es(row['Ingresos'])}")
+                st.markdown(f"Gastos: {formato_importe_es(row['Gastos'])}")
+                st.markdown(f"<span style='color:{color}; font-weight:bold'>Neto: {formato_importe_es(row['Neto'])}</span>", unsafe_allow_html=True)
+
+        st.markdown("---")
+
+        # Tabla comparativa
+        df_tabla = df_resumen.copy()
+        df_tabla['Ingresos'] = df_tabla['Ingresos'].apply(formato_importe_es)
+        df_tabla['Gastos'] = df_tabla['Gastos'].apply(formato_importe_es)
+        df_tabla['Neto'] = df_tabla['Neto'].apply(formato_importe_es)
+
+        st.dataframe(df_tabla, use_container_width=True, hide_index=True)
+
+    st.markdown("---")
+
+    # Tabla P&L mensual total
+    st.markdown("### 📊 P&L Mensual Total")
+
+    df_tabla_total = df_pnl_total.copy()
+    df_tabla_total['Mes'] = df_tabla_total['mes']
+    df_tabla_total['Ingresos'] = df_tabla_total['ingresos'].apply(formato_importe_es)
+    df_tabla_total['Gastos'] = df_tabla_total['gastos'].apply(lambda x: formato_importe_es(abs(x)))
+    df_tabla_total['Neto'] = df_tabla_total['neto'].apply(formato_importe_es)
+
+    st.dataframe(
+        df_tabla_total[['Mes', 'Ingresos', 'Gastos', 'Neto']],
+        use_container_width=True,
+        hide_index=True
+    )
+
+
+def pagina_vehiculo():
+    """Vista de análisis por vehículo con pestañas."""
+    st.markdown('<p class="main-header">🚛 Análisis por Vehículo</p>', unsafe_allow_html=True)
+    st.markdown('<p class="sub-header">Ingresos, gastos y resultado neto por vehículo</p>', unsafe_allow_html=True)
+
+    # Verificar si hay datos
+    movimientos = get_movimientos()
+    if len(movimientos) == 0:
+        st.info("📭 No hay movimientos importados. Ve a la sección **Importar CSV** o **Combustible/Peajes** para cargar datos.")
+        return
+
+    # Obtener vehículos
+    vehiculos = get_vehiculos()
 
     if len(vehiculos) == 0:
         st.error("No hay vehículos configurados")
         return
 
-    vehiculo_sel = st.selectbox(
-        "Selecciona vehículo",
-        options=vehiculos['id'].tolist(),
-        format_func=lambda x: f"{x} - {vehiculos[vehiculos['id']==x]['descripcion'].values[0]}"
-    )
+    # Crear pestañas: una por cada vehículo + Totales
+    tab_names = ["📊 TOTALES"] + [f"🚛 {v}" for v in vehiculos['id'].tolist()]
+    tabs = st.tabs(tab_names)
 
-    st.info(f"🚧 Vista P&L detallado para **{vehiculo_sel}** en desarrollo.")
+    # Pestaña de totales
+    with tabs[0]:
+        mostrar_tab_totales()
+
+    # Pestañas por vehículo
+    for i, (_, veh) in enumerate(vehiculos.iterrows()):
+        with tabs[i + 1]:
+            mostrar_tab_vehiculo(veh['id'], veh['descripcion'])
 
 
 # ============== PÁGINA: CONFIGURACIÓN ==============
