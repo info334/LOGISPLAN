@@ -10,13 +10,21 @@ from datetime import datetime
 # Importar módulos propios
 from database import (
     init_database, get_vehiculos, get_categorias, get_movimientos,
-    insertar_movimientos, get_vehiculos_operativos
+    insertar_movimientos, get_vehiculos_operativos,
+    get_amortizaciones, guardar_amortizaciones, inicializar_amortizaciones_default,
+    get_costes_laborales, insertar_costes_laborales_batch, get_resumen_costes_por_vehiculo,
+    eliminar_movimientos, get_movimientos_con_filtros,
+    get_facturacion, insertar_facturacion, eliminar_facturacion
 )
 from importador import (
     parsear_csv_abanca, auto_categorizar, preparar_para_guardado,
     validar_importacion, detectar_duplicados
 )
 from importador_facturas import parsear_factura_pdf, generar_movimientos_para_db
+
+# Para parseo de PDF de costes laborales
+import pdfplumber
+import re
 
 # ============== CONFIGURACIÓN DE PÁGINA ==============
 
@@ -82,6 +90,9 @@ def render_sidebar():
         "🚛 Por Vehículo": "vehiculo",
         "📥 Importar CSV": "importar",
         "⛽ Combustible/Peajes": "facturas",
+        "📋 Registros": "registros",
+        "👷 Costes Laborales": "costes_laborales",
+        "💰 Facturación": "facturacion",
         "⚙️ Configuración": "config"
     }
 
@@ -92,7 +103,54 @@ def render_sidebar():
     )
 
     st.sidebar.markdown("---")
-    st.sidebar.caption(f"v1.0 | {datetime.now().strftime('%Y')}")
+
+    # Checklist de tareas mensuales
+    st.sidebar.markdown("### 📝 Tareas del mes")
+
+    # Inicializar estado de checklist si no existe
+    if 'checklist_gasoil' not in st.session_state:
+        st.session_state.checklist_gasoil = False
+    if 'checklist_costes_laborales' not in st.session_state:
+        st.session_state.checklist_costes_laborales = False
+    if 'checklist_banco' not in st.session_state:
+        st.session_state.checklist_banco = False
+    if 'checklist_facturacion' not in st.session_state:
+        st.session_state.checklist_facturacion = False
+
+    st.session_state.checklist_gasoil = st.sidebar.checkbox(
+        "⛽ Gasoil",
+        value=st.session_state.checklist_gasoil,
+        key="check_gasoil"
+    )
+    st.session_state.checklist_costes_laborales = st.sidebar.checkbox(
+        "👷 Costes laborales",
+        value=st.session_state.checklist_costes_laborales,
+        key="check_costes"
+    )
+    st.session_state.checklist_banco = st.sidebar.checkbox(
+        "🏦 Fichero banco",
+        value=st.session_state.checklist_banco,
+        key="check_banco"
+    )
+    st.session_state.checklist_facturacion = st.sidebar.checkbox(
+        "📄 Facturación",
+        value=st.session_state.checklist_facturacion,
+        key="check_facturacion"
+    )
+
+    # Mostrar progreso
+    tareas_completadas = sum([
+        st.session_state.checklist_gasoil,
+        st.session_state.checklist_costes_laborales,
+        st.session_state.checklist_banco,
+        st.session_state.checklist_facturacion
+    ])
+    st.sidebar.progress(tareas_completadas / 4)
+    st.sidebar.caption(f"{tareas_completadas}/4 tareas completadas")
+
+    st.sidebar.markdown("---")
+    st.sidebar.caption(f"v2.0 | {datetime.now().strftime('%Y')}")
+    st.sidebar.caption("Seve Fernández")
 
     return paginas[seleccion]
 
@@ -496,9 +554,890 @@ def pagina_vehiculo():
 # ============== PÁGINA: CONFIGURACIÓN ==============
 
 def pagina_config():
-    """Vista de configuración."""
+    """Vista de configuración de amortizaciones."""
     st.markdown('<p class="main-header">⚙️ Configuración</p>', unsafe_allow_html=True)
-    st.info("🚧 Configuración de amortizaciones y reglas de categorización en desarrollo.")
+    st.markdown('<p class="sub-header">Configuración de amortizaciones por activo</p>', unsafe_allow_html=True)
+
+    # Inicializar amortizaciones por defecto si está vacía
+    inicializar_amortizaciones_default()
+
+    # Obtener amortizaciones actuales
+    df_amort = get_amortizaciones()
+
+    # Opciones de vehículos
+    vehiculos_options = ["MTY", "LVX", "MJC", "MLB", "COMÚN"]
+
+    st.markdown("### 📊 Amortizaciones por Activo")
+    st.caption("Edita los valores y pulsa 'Guardar' para actualizar. La amortización mensual se calcula automáticamente.")
+
+    # Estado de sesión para edición
+    if 'df_amort_edit' not in st.session_state or st.session_state.get('reload_amort', False):
+        if len(df_amort) > 0:
+            st.session_state.df_amort_edit = df_amort[['activo', 'matricula', 'vehiculo_id', 'amortizacion_anual', 'amortizacion_mensual']].copy()
+        else:
+            st.session_state.df_amort_edit = pd.DataFrame({
+                'activo': [''],
+                'matricula': [''],
+                'vehiculo_id': ['COMÚN'],
+                'amortizacion_anual': [0.0],
+                'amortizacion_mensual': [0.0]
+            })
+        st.session_state.reload_amort = False
+
+    # Configuración del editor
+    column_config = {
+        "activo": st.column_config.TextColumn(
+            "Activo",
+            help="Nombre del activo",
+            width="medium",
+            required=True
+        ),
+        "matricula": st.column_config.TextColumn(
+            "Matrícula",
+            help="Matrícula del vehículo",
+            width="small"
+        ),
+        "vehiculo_id": st.column_config.SelectboxColumn(
+            "Vehículo",
+            help="Vehículo al que se asigna",
+            options=vehiculos_options,
+            width="small",
+            required=True
+        ),
+        "amortizacion_anual": st.column_config.NumberColumn(
+            "Amort. Anual €",
+            help="Amortización anual en euros",
+            min_value=0,
+            format="%.2f €",
+            width="small",
+            required=True
+        ),
+        "amortizacion_mensual": st.column_config.NumberColumn(
+            "Amort. Mensual €",
+            help="Se calcula automáticamente (anual / 12)",
+            format="%.2f €",
+            width="small",
+            disabled=True
+        )
+    }
+
+    # Editor de datos
+    edited_df = st.data_editor(
+        st.session_state.df_amort_edit,
+        column_config=column_config,
+        use_container_width=True,
+        hide_index=True,
+        num_rows="dynamic",
+        key="amort_editor"
+    )
+
+    # Auto-calcular amortización mensual
+    if edited_df is not None:
+        edited_df['amortizacion_mensual'] = edited_df['amortizacion_anual'] / 12
+        st.session_state.df_amort_edit = edited_df
+
+    # Resumen por vehículo
+    if len(edited_df) > 0 and edited_df['amortizacion_anual'].sum() > 0:
+        st.markdown("---")
+        st.markdown("### 📈 Resumen por Vehículo")
+
+        resumen = edited_df.groupby('vehiculo_id').agg({
+            'amortizacion_anual': 'sum',
+            'amortizacion_mensual': 'sum'
+        }).reset_index()
+
+        # Mostrar como métricas
+        cols = st.columns(len(resumen))
+        for i, (_, row) in enumerate(resumen.iterrows()):
+            with cols[i]:
+                st.metric(
+                    row['vehiculo_id'],
+                    formato_importe_es(row['amortizacion_mensual']) + "/mes",
+                    f"{formato_importe_es(row['amortizacion_anual'])}/año"
+                )
+
+        # Total
+        st.markdown("---")
+        col_total1, col_total2, col_total3 = st.columns([1, 1, 2])
+        with col_total1:
+            st.metric("Total Anual", formato_importe_es(edited_df['amortizacion_anual'].sum()))
+        with col_total2:
+            st.metric("Total Mensual", formato_importe_es(edited_df['amortizacion_mensual'].sum()))
+
+    st.markdown("---")
+
+    # Botones de acción
+    col_btn1, col_btn2, col_btn3 = st.columns([1, 1, 3])
+
+    with col_btn1:
+        if st.button("💾 Guardar amortizaciones", type="primary", use_container_width=True):
+            # Validar datos
+            df_guardar = edited_df[edited_df['activo'].str.strip() != ''].copy()
+
+            if len(df_guardar) == 0:
+                st.error("No hay activos válidos para guardar")
+            else:
+                # Preparar para guardar
+                amortizaciones_lista = []
+                for _, row in df_guardar.iterrows():
+                    amortizaciones_lista.append({
+                        'activo': row['activo'],
+                        'matricula': row['matricula'] if pd.notna(row['matricula']) else None,
+                        'vehiculo_id': row['vehiculo_id'],
+                        'amortizacion_anual': float(row['amortizacion_anual']),
+                        'amortizacion_mensual': float(row['amortizacion_anual']) / 12
+                    })
+
+                guardar_amortizaciones(amortizaciones_lista)
+                st.success(f"✅ Guardadas {len(amortizaciones_lista)} amortizaciones")
+                st.session_state.reload_amort = True
+                st.rerun()
+
+    with col_btn2:
+        if st.button("🔄 Recargar", use_container_width=True):
+            st.session_state.reload_amort = True
+            st.rerun()
+
+
+# ============== PÁGINA: REGISTROS ==============
+
+def pagina_registros():
+    """Vista de registros con filtros y borrado."""
+    st.markdown('<p class="main-header">📋 Registros</p>', unsafe_allow_html=True)
+    st.markdown('<p class="sub-header">Visualiza, filtra y gestiona los movimientos importados</p>', unsafe_allow_html=True)
+
+    # Obtener opciones para filtros
+    vehiculos_df = get_vehiculos()
+    categorias_df = get_categorias()
+
+    vehiculo_options = ["Todos"] + vehiculos_df['id'].tolist()
+    categoria_options = ["Todas"] + categorias_df['id'].tolist()
+
+    # Estado de sesión
+    if 'registros_pagina' not in st.session_state:
+        st.session_state.registros_pagina = 0
+    if 'registros_seleccionados' not in st.session_state:
+        st.session_state.registros_seleccionados = set()
+
+    # Filtros en columnas
+    st.markdown("### 🔍 Filtros")
+    col_f1, col_f2, col_f3, col_f4, col_f5 = st.columns([1.5, 1.5, 1.5, 1.5, 1])
+
+    with col_f1:
+        fecha_desde = st.date_input(
+            "Fecha desde",
+            value=None,
+            key="filtro_fecha_desde"
+        )
+
+    with col_f2:
+        fecha_hasta = st.date_input(
+            "Fecha hasta",
+            value=None,
+            key="filtro_fecha_hasta"
+        )
+
+    with col_f3:
+        vehiculos_sel = st.multiselect(
+            "Vehículo",
+            options=vehiculo_options,
+            default=["Todos"],
+            key="filtro_vehiculos"
+        )
+
+    with col_f4:
+        categorias_sel = st.multiselect(
+            "Categoría",
+            options=categoria_options,
+            default=["Todas"],
+            key="filtro_categorias"
+        )
+
+    with col_f5:
+        tipo_sel = st.selectbox(
+            "Tipo",
+            options=["Todos", "Ingresos", "Gastos"],
+            key="filtro_tipo"
+        )
+
+    # Procesar filtros
+    vehiculos_filtro = None if "Todos" in vehiculos_sel or len(vehiculos_sel) == 0 else vehiculos_sel
+    categorias_filtro = None if "Todas" in categorias_sel or len(categorias_sel) == 0 else categorias_sel
+    tipo_filtro = None if tipo_sel == "Todos" else tipo_sel
+
+    # Obtener datos con paginación
+    REGISTROS_POR_PAGINA = 50
+    offset = st.session_state.registros_pagina * REGISTROS_POR_PAGINA
+
+    df_registros, total_registros = get_movimientos_con_filtros(
+        fecha_desde=fecha_desde.strftime('%Y-%m-%d') if fecha_desde else None,
+        fecha_hasta=fecha_hasta.strftime('%Y-%m-%d') if fecha_hasta else None,
+        vehiculos=vehiculos_filtro,
+        categorias=categorias_filtro,
+        tipo=tipo_filtro,
+        limit=REGISTROS_POR_PAGINA,
+        offset=offset
+    )
+
+    total_paginas = max(1, (total_registros + REGISTROS_POR_PAGINA - 1) // REGISTROS_POR_PAGINA)
+
+    st.markdown("---")
+
+    # Información de resultados
+    st.markdown(f"**{total_registros:,}** registros encontrados | Página **{st.session_state.registros_pagina + 1}** de **{total_paginas}**")
+
+    if len(df_registros) == 0:
+        st.info("📭 No hay registros que coincidan con los filtros seleccionados.")
+        return
+
+    # Botones de selección
+    col_sel1, col_sel2, col_sel3 = st.columns([1, 1, 4])
+
+    with col_sel1:
+        if st.button("☑️ Seleccionar todos", key="sel_todos"):
+            for idx in df_registros['id'].tolist():
+                st.session_state.registros_seleccionados.add(idx)
+            st.rerun()
+
+    with col_sel2:
+        if st.button("☐ Deseleccionar todos", key="desel_todos"):
+            st.session_state.registros_seleccionados.clear()
+            st.rerun()
+
+    # Tabla de registros con checkboxes
+    st.markdown("### 📊 Registros")
+
+    # Cabecera
+    col_check, col_fecha, col_desc, col_cat, col_veh, col_importe = st.columns([0.5, 1, 4, 1.2, 1, 1.5])
+    with col_check:
+        st.write("**☑️**")
+    with col_fecha:
+        st.write("**Fecha**")
+    with col_desc:
+        st.write("**Descripción**")
+    with col_cat:
+        st.write("**Categoría**")
+    with col_veh:
+        st.write("**Vehículo**")
+    with col_importe:
+        st.write("**Importe**")
+
+    st.markdown("<hr style='margin:5px 0; border:none; border-top:2px solid #1f4e79;'>", unsafe_allow_html=True)
+
+    # Filas de datos
+    for _, row in df_registros.iterrows():
+        reg_id = int(row['id'])
+        importe = float(row['importe'])
+        es_gasto = importe < 0
+
+        col_check, col_fecha, col_desc, col_cat, col_veh, col_importe = st.columns([0.5, 1, 4, 1.2, 1, 1.5])
+
+        with col_check:
+            checked = st.checkbox(
+                "",
+                value=reg_id in st.session_state.registros_seleccionados,
+                key=f"check_{reg_id}",
+                label_visibility="collapsed"
+            )
+            if checked:
+                st.session_state.registros_seleccionados.add(reg_id)
+            elif reg_id in st.session_state.registros_seleccionados:
+                st.session_state.registros_seleccionados.discard(reg_id)
+
+        with col_fecha:
+            st.write(str(row['fecha'])[:10])
+
+        with col_desc:
+            desc_text = str(row['descripcion'])[:50]
+            if len(str(row['descripcion'])) > 50:
+                desc_text += "..."
+            st.write(desc_text)
+
+        with col_cat:
+            cat_nombre = row['categoria_nombre'] if row['categoria_nombre'] else row['categoria_id']
+            st.write(cat_nombre or "-")
+
+        with col_veh:
+            st.write(row['vehiculo_id'] or "-")
+
+        with col_importe:
+            color = "red" if es_gasto else "green"
+            st.markdown(f"<span style='color:{color}'>{formato_importe_es(importe)}</span>", unsafe_allow_html=True)
+
+    st.markdown("<hr style='margin:5px 0; border:none; border-top:1px solid #ddd;'>", unsafe_allow_html=True)
+
+    # Paginación
+    st.markdown("---")
+    col_pag1, col_pag2, col_pag3, col_pag4, col_pag5 = st.columns([1, 1, 2, 1, 1])
+
+    with col_pag1:
+        if st.button("⏮️ Primera", disabled=st.session_state.registros_pagina == 0):
+            st.session_state.registros_pagina = 0
+            st.rerun()
+
+    with col_pag2:
+        if st.button("◀️ Anterior", disabled=st.session_state.registros_pagina == 0):
+            st.session_state.registros_pagina -= 1
+            st.rerun()
+
+    with col_pag3:
+        st.write(f"Página {st.session_state.registros_pagina + 1} de {total_paginas}")
+
+    with col_pag4:
+        if st.button("▶️ Siguiente", disabled=st.session_state.registros_pagina >= total_paginas - 1):
+            st.session_state.registros_pagina += 1
+            st.rerun()
+
+    with col_pag5:
+        if st.button("⏭️ Última", disabled=st.session_state.registros_pagina >= total_paginas - 1):
+            st.session_state.registros_pagina = total_paginas - 1
+            st.rerun()
+
+    # Resumen de selección y borrado
+    st.markdown("---")
+
+    num_seleccionados = len(st.session_state.registros_seleccionados)
+
+    if num_seleccionados > 0:
+        # Calcular total de seleccionados (solo los que están en la página actual para mostrar)
+        ids_seleccionados_en_pagina = [id for id in st.session_state.registros_seleccionados if id in df_registros['id'].values]
+        total_seleccionados = df_registros[df_registros['id'].isin(st.session_state.registros_seleccionados)]['importe'].sum()
+
+        st.markdown(f"### 🗑️ **{num_seleccionados}** registros seleccionados | Total visible: **{formato_importe_es(total_seleccionados)}**")
+
+        col_del1, col_del2 = st.columns([1, 4])
+
+        with col_del1:
+            if st.button("🗑️ Borrar seleccionados", type="primary", use_container_width=True):
+                st.session_state.confirmar_borrado = True
+
+        # Confirmación de borrado
+        if st.session_state.get('confirmar_borrado', False):
+            st.warning(f"⚠️ ¿Estás seguro de que quieres borrar **{num_seleccionados}** registros? Esta acción no se puede deshacer.")
+
+            col_conf1, col_conf2, col_conf3 = st.columns([1, 1, 3])
+
+            with col_conf1:
+                if st.button("✅ Confirmar borrado", type="primary"):
+                    # Ejecutar borrado
+                    ids_a_borrar = list(st.session_state.registros_seleccionados)
+                    eliminados = eliminar_movimientos(ids_a_borrar)
+                    st.success(f"✅ Se han eliminado {eliminados} registros")
+                    st.session_state.registros_seleccionados.clear()
+                    st.session_state.confirmar_borrado = False
+                    st.rerun()
+
+            with col_conf2:
+                if st.button("❌ Cancelar"):
+                    st.session_state.confirmar_borrado = False
+                    st.rerun()
+    else:
+        st.info("Selecciona registros usando los checkboxes para poder borrarlos")
+
+
+# ============== PÁGINA: COSTES LABORALES ==============
+
+# Mapeo de trabajadores a vehículos
+TRABAJADORES = {
+    1: {"nombre": "SEVERINO", "vehiculo": "MLB"},
+    2: {"nombre": "JOSE MANUEL", "vehiculo": "LVX"},
+    3: {"nombre": "CARLOS", "vehiculo": "MJC"},
+    4: {"nombre": "JESUS", "vehiculo": "MTY"},
+    5: {"nombre": "MERCEDES BEGOÑA", "vehiculo": "COMÚN"},
+    8: {"nombre": "SUSANA", "vehiculo": "COMÚN"},
+}
+
+
+def parsear_pdf_costes_laborales(pdf_bytes, filename):
+    """
+    Parsea un PDF de costes laborales con formato COST_YYYYMM_Emp_65.pdf
+    Extrae: nombre, bruto, ss_trabajador, irpf, liquido, ss_empresa, coste_total
+    """
+    resultados = []
+    errores = []
+
+    # Extraer mes del nombre del archivo (formato COST_YYYYMM_...)
+    mes_match = re.search(r'COST_(\d{6})', filename)
+    if mes_match:
+        year_month = mes_match.group(1)
+        mes = f"{year_month[:4]}-{year_month[4:6]}"  # Formato YYYY-MM
+    else:
+        errores.append(f"No se pudo extraer el mes del nombre del archivo: {filename}")
+        return resultados, errores, None
+
+    try:
+        import io
+        with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
+            texto_completo = ""
+            for page in pdf.pages:
+                texto_completo += page.extract_text() or ""
+
+            # Buscar líneas que empiecen con números del 1-8 (ID de trabajador)
+            lineas = texto_completo.split('\n')
+
+            for linea in lineas:
+                linea = linea.strip()
+                if not linea:
+                    continue
+
+                # Buscar patrón: número al inicio seguido de nombre
+                match = re.match(r'^(\d)\s+(.+)', linea)
+                if match:
+                    trabajador_id = int(match.group(1))
+
+                    if trabajador_id not in TRABAJADORES:
+                        continue
+
+                    # Extraer números de la línea (valores monetarios)
+                    # Buscar todos los números con decimales
+                    numeros = re.findall(r'[\d.,]+', linea)
+
+                    # Filtrar y convertir números
+                    valores = []
+                    for num in numeros:
+                        try:
+                            # Convertir formato español a float
+                            num_clean = num.replace('.', '').replace(',', '.')
+                            val = float(num_clean)
+                            if val > 0:  # Solo valores positivos significativos
+                                valores.append(val)
+                        except ValueError:
+                            continue
+
+                    # Estructura esperada: bruto, ss_trab, irpf, liquido, ss_emp, coste_total
+                    # El orden puede variar según el PDF
+                    if len(valores) >= 6:
+                        trabajador_info = TRABAJADORES[trabajador_id]
+
+                        # Asumimos el orden más común en nóminas
+                        resultado = {
+                            'mes': mes,
+                            'trabajador_id': trabajador_id,
+                            'nombre': trabajador_info['nombre'],
+                            'vehiculo_id': trabajador_info['vehiculo'],
+                            'bruto': valores[0] if len(valores) > 0 else 0,
+                            'ss_trabajador': valores[1] if len(valores) > 1 else 0,
+                            'irpf': valores[2] if len(valores) > 2 else 0,
+                            'liquido': valores[3] if len(valores) > 3 else 0,
+                            'ss_empresa': valores[4] if len(valores) > 4 else 0,
+                            'coste_total': valores[5] if len(valores) > 5 else 0,
+                        }
+                        resultados.append(resultado)
+
+    except Exception as e:
+        errores.append(f"Error procesando PDF: {str(e)}")
+
+    return resultados, errores, mes
+
+
+def pagina_costes_laborales():
+    """Vista de gestión de costes laborales."""
+    st.markdown('<p class="main-header">👷 Costes Laborales</p>', unsafe_allow_html=True)
+    st.markdown('<p class="sub-header">Importa y gestiona los costes laborales por trabajador y vehículo</p>', unsafe_allow_html=True)
+
+    # Estado de sesión
+    if 'costes_preview' not in st.session_state:
+        st.session_state.costes_preview = None
+    if 'costes_mes' not in st.session_state:
+        st.session_state.costes_mes = None
+
+    # Tabs para las opciones
+    tab1, tab2, tab3 = st.tabs(["📄 Importar PDF", "✏️ Entrada Manual", "📊 Resumen"])
+
+    with tab1:
+        st.markdown("### 📄 Importar PDF de Costes")
+        st.caption("Sube un PDF con formato COST_YYYYMM_Emp_65.pdf")
+
+        archivo_pdf = st.file_uploader(
+            "Selecciona archivo PDF",
+            type=['pdf'],
+            key="pdf_costes",
+            help="Formato esperado: COST_YYYYMM_Emp_65.pdf (ej: COST_202401_Emp_65.pdf)"
+        )
+
+        if archivo_pdf is not None:
+            with st.spinner("Procesando PDF..."):
+                resultados, errores, mes = parsear_pdf_costes_laborales(
+                    archivo_pdf.read(),
+                    archivo_pdf.name
+                )
+
+            if errores:
+                for error in errores:
+                    st.error(error)
+
+            if resultados:
+                st.session_state.costes_preview = resultados
+                st.session_state.costes_mes = mes
+
+                st.success(f"✅ Se encontraron {len(resultados)} trabajadores para el mes **{mes}**")
+
+                # Vista previa
+                st.markdown("### 👁️ Vista Previa")
+
+                datos_preview = []
+                for r in resultados:
+                    datos_preview.append({
+                        'Trabajador': r['nombre'],
+                        'Vehículo': r['vehiculo_id'],
+                        'Bruto': formato_importe_es(r['bruto']),
+                        'SS Trabajador': formato_importe_es(r['ss_trabajador']),
+                        'IRPF': formato_importe_es(r['irpf']),
+                        'Líquido': formato_importe_es(r['liquido']),
+                        'SS Empresa': formato_importe_es(r['ss_empresa']),
+                        'Coste Total': formato_importe_es(r['coste_total'])
+                    })
+
+                df_preview = pd.DataFrame(datos_preview)
+                st.dataframe(df_preview, use_container_width=True, hide_index=True)
+
+                # Totales
+                total_coste = sum(r['coste_total'] for r in resultados)
+                total_bruto = sum(r['bruto'] for r in resultados)
+                total_ss_emp = sum(r['ss_empresa'] for r in resultados)
+
+                st.markdown("---")
+                col_t1, col_t2, col_t3 = st.columns(3)
+                with col_t1:
+                    st.metric("Total Bruto", formato_importe_es(total_bruto))
+                with col_t2:
+                    st.metric("Total SS Empresa", formato_importe_es(total_ss_emp))
+                with col_t3:
+                    st.metric("Coste Total", formato_importe_es(total_coste))
+
+                # Botón importar
+                st.markdown("---")
+                col_btn1, col_btn2 = st.columns([1, 4])
+                with col_btn1:
+                    if st.button("💾 Importar costes", type="primary", use_container_width=True):
+                        num_insertados = insertar_costes_laborales_batch(resultados)
+                        st.success(f"✅ Importados {num_insertados} registros de costes laborales")
+                        st.session_state.costes_preview = None
+                        st.session_state.costes_mes = None
+                        st.rerun()
+
+            elif not errores:
+                st.warning("No se encontraron datos de trabajadores en el PDF. Verifica el formato.")
+
+        # Mapeo de trabajadores
+        with st.expander("ℹ️ Mapeo de trabajadores"):
+            st.markdown("**Trabajadores configurados:**")
+            for tid, info in TRABAJADORES.items():
+                st.markdown(f"- **{tid}**: {info['nombre']} → Vehículo: **{info['vehiculo']}**")
+
+    with tab2:
+        st.markdown("### ✏️ Entrada Manual de Costes")
+
+        # Selector de mes
+        col_mes1, col_mes2 = st.columns(2)
+        with col_mes1:
+            anio = st.selectbox(
+                "Año",
+                options=list(range(datetime.now().year, datetime.now().year - 5, -1)),
+                key="manual_anio"
+            )
+        with col_mes2:
+            mes_num = st.selectbox(
+                "Mes",
+                options=list(range(1, 13)),
+                format_func=lambda x: f"{x:02d} - {['Enero', 'Febrero', 'Marzo', 'Abril', 'Mayo', 'Junio', 'Julio', 'Agosto', 'Septiembre', 'Octubre', 'Noviembre', 'Diciembre'][x-1]}",
+                key="manual_mes"
+            )
+
+        mes_str = f"{anio}-{mes_num:02d}"
+
+        st.markdown("---")
+
+        # Selector de trabajador
+        trabajador_options = {f"{tid}: {info['nombre']} ({info['vehiculo']})": tid for tid, info in TRABAJADORES.items()}
+        trabajador_sel = st.selectbox(
+            "Trabajador",
+            options=list(trabajador_options.keys()),
+            key="manual_trabajador"
+        )
+        trabajador_id = trabajador_options[trabajador_sel]
+        trabajador_info = TRABAJADORES[trabajador_id]
+
+        # Campos de entrada
+        col_inp1, col_inp2 = st.columns(2)
+        with col_inp1:
+            bruto = st.number_input("Salario Bruto (€)", min_value=0.0, step=100.0, key="manual_bruto")
+            ss_trabajador = st.number_input("SS Trabajador (€)", min_value=0.0, step=50.0, key="manual_ss_trab")
+            irpf = st.number_input("IRPF (€)", min_value=0.0, step=50.0, key="manual_irpf")
+
+        with col_inp2:
+            liquido = st.number_input("Líquido (€)", min_value=0.0, step=100.0, key="manual_liquido")
+            ss_empresa = st.number_input("SS Empresa (€)", min_value=0.0, step=50.0, key="manual_ss_emp")
+            otros = st.number_input("Otros costes (€)", min_value=0.0, step=10.0, key="manual_otros")
+
+        # Calcular coste total
+        coste_total = bruto + ss_empresa + otros
+
+        st.markdown("---")
+        st.metric("Coste Total Calculado", formato_importe_es(coste_total))
+
+        # Botón añadir
+        if st.button("➕ Añadir coste laboral", type="primary"):
+            if bruto <= 0:
+                st.error("El salario bruto debe ser mayor que 0")
+            else:
+                coste = {
+                    'mes': mes_str,
+                    'trabajador_id': trabajador_id,
+                    'nombre': trabajador_info['nombre'],
+                    'vehiculo_id': trabajador_info['vehiculo'],
+                    'bruto': bruto,
+                    'ss_trabajador': ss_trabajador,
+                    'irpf': irpf,
+                    'liquido': liquido,
+                    'ss_empresa': ss_empresa,
+                    'coste_total': coste_total
+                }
+                insertar_costes_laborales_batch([coste])
+                st.success(f"✅ Coste laboral añadido para {trabajador_info['nombre']} ({mes_str})")
+                st.rerun()
+
+    with tab3:
+        st.markdown("### 📊 Resumen de Costes Laborales")
+
+        # Obtener todos los costes
+        df_costes = get_costes_laborales()
+
+        if len(df_costes) == 0:
+            st.info("📭 No hay costes laborales registrados. Importa un PDF o añade manualmente.")
+            return
+
+        # Tabla pivote: mes vs vehículo
+        resumen = df_costes.groupby(['mes', 'vehiculo_id']).agg({
+            'coste_total': 'sum'
+        }).reset_index()
+
+        # Crear tabla pivote
+        pivot = resumen.pivot(index='mes', columns='vehiculo_id', values='coste_total').fillna(0)
+
+        # Añadir columna de total
+        pivot['TOTAL'] = pivot.sum(axis=1)
+
+        # Ordenar por mes descendente
+        pivot = pivot.sort_index(ascending=False)
+
+        # Formatear valores
+        pivot_formatted = pivot.copy()
+        for col in pivot_formatted.columns:
+            pivot_formatted[col] = pivot_formatted[col].apply(lambda x: formato_importe_es(x) if x > 0 else '-')
+
+        st.markdown("#### Costes por Vehículo/Mes")
+        st.dataframe(pivot_formatted, use_container_width=True)
+
+        # Métricas totales
+        st.markdown("---")
+        st.markdown("#### Totales por Vehículo")
+
+        totales_vehiculo = df_costes.groupby('vehiculo_id')['coste_total'].sum()
+
+        cols = st.columns(len(totales_vehiculo) + 1)
+        for i, (veh, total) in enumerate(totales_vehiculo.items()):
+            with cols[i]:
+                st.metric(veh, formato_importe_es(total))
+
+        with cols[-1]:
+            st.metric("TOTAL", formato_importe_es(totales_vehiculo.sum()))
+
+        # Detalle por trabajador
+        st.markdown("---")
+        with st.expander("📋 Detalle por Trabajador"):
+            # Filtro de mes
+            meses_disponibles = ["Todos"] + sorted(df_costes['mes'].unique().tolist(), reverse=True)
+            mes_filtro = st.selectbox("Filtrar por mes", options=meses_disponibles, key="filtro_mes_costes")
+
+            df_detalle = df_costes.copy()
+            if mes_filtro != "Todos":
+                df_detalle = df_detalle[df_detalle['mes'] == mes_filtro]
+
+            # Mostrar tabla
+            datos_detalle = []
+            for _, row in df_detalle.iterrows():
+                datos_detalle.append({
+                    'Mes': row['mes'],
+                    'Trabajador': row['nombre'],
+                    'Vehículo': row['vehiculo_id'],
+                    'Bruto': formato_importe_es(row['bruto']),
+                    'SS Empresa': formato_importe_es(row['ss_empresa']),
+                    'Coste Total': formato_importe_es(row['coste_total'])
+                })
+
+            if datos_detalle:
+                st.dataframe(pd.DataFrame(datos_detalle), use_container_width=True, hide_index=True)
+
+
+# ============== PÁGINA: FACTURACIÓN ==============
+
+def pagina_facturacion():
+    """Vista de gestión de facturación por vehículo."""
+    st.markdown('<p class="main-header">💰 Facturación</p>', unsafe_allow_html=True)
+    st.markdown('<p class="sub-header">Registra la facturación mensual por vehículo</p>', unsafe_allow_html=True)
+
+    # Obtener vehículos operativos
+    vehiculos_df = get_vehiculos_operativos()
+    vehiculos_options = vehiculos_df['id'].tolist()
+
+    # Tabs para entrada y resumen
+    tab1, tab2 = st.tabs(["✏️ Introducir Facturación", "📊 Resumen"])
+
+    with tab1:
+        st.markdown("### ✏️ Nueva Facturación")
+
+        # Formulario de entrada
+        col_form1, col_form2 = st.columns(2)
+
+        with col_form1:
+            # Selector de año y mes
+            anio = st.selectbox(
+                "Año",
+                options=list(range(datetime.now().year, datetime.now().year - 5, -1)),
+                key="fact_anio"
+            )
+            mes_num = st.selectbox(
+                "Mes",
+                options=list(range(1, 13)),
+                format_func=lambda x: f"{x:02d} - {['Enero', 'Febrero', 'Marzo', 'Abril', 'Mayo', 'Junio', 'Julio', 'Agosto', 'Septiembre', 'Octubre', 'Noviembre', 'Diciembre'][x-1]}",
+                key="fact_mes"
+            )
+
+        with col_form2:
+            # Selector de vehículo
+            vehiculo_sel = st.selectbox(
+                "Vehículo",
+                options=vehiculos_options,
+                key="fact_vehiculo"
+            )
+
+            # Importe
+            importe = st.number_input(
+                "Importe facturado (€)",
+                min_value=0.0,
+                step=500.0,
+                format="%.2f",
+                key="fact_importe"
+            )
+
+        # Descripción opcional
+        descripcion = st.text_input(
+            "Descripción (opcional)",
+            placeholder="Ej: Factura cliente X, portes mes...",
+            key="fact_descripcion"
+        )
+
+        mes_str = f"{anio}-{mes_num:02d}"
+
+        st.markdown("---")
+
+        # Botón añadir
+        col_btn1, col_btn2 = st.columns([1, 4])
+        with col_btn1:
+            if st.button("💾 Guardar facturación", type="primary", use_container_width=True):
+                if importe <= 0:
+                    st.error("El importe debe ser mayor que 0")
+                else:
+                    factura = {
+                        'mes': mes_str,
+                        'vehiculo_id': vehiculo_sel,
+                        'importe': importe,
+                        'descripcion': descripcion if descripcion else None
+                    }
+                    insertar_facturacion(factura)
+                    st.success(f"✅ Facturación guardada: {vehiculo_sel} - {mes_str} - {formato_importe_es(importe)}")
+                    st.rerun()
+
+        # Mostrar facturación existente del mes seleccionado
+        st.markdown("---")
+        st.markdown(f"### 📋 Facturación registrada en {mes_str}")
+
+        df_mes = get_facturacion(mes=mes_str)
+
+        if len(df_mes) > 0:
+            datos_mes = []
+            for _, row in df_mes.iterrows():
+                datos_mes.append({
+                    'Vehículo': row['vehiculo_id'],
+                    'Importe': formato_importe_es(row['importe']),
+                    'Descripción': row['descripcion'] or '-',
+                    'ID': row['id']
+                })
+
+            # Mostrar tabla
+            for dato in datos_mes:
+                col_v, col_i, col_d, col_del = st.columns([1, 1.5, 2, 0.5])
+                with col_v:
+                    st.write(f"**{dato['Vehículo']}**")
+                with col_i:
+                    st.write(dato['Importe'])
+                with col_d:
+                    st.write(dato['Descripción'])
+                with col_del:
+                    if st.button("🗑️", key=f"del_fact_{dato['ID']}"):
+                        eliminar_facturacion(dato['ID'])
+                        st.rerun()
+
+            # Total del mes
+            total_mes = df_mes['importe'].sum()
+            st.markdown("---")
+            st.metric(f"Total {mes_str}", formato_importe_es(total_mes))
+        else:
+            st.info(f"No hay facturación registrada para {mes_str}")
+
+    with tab2:
+        st.markdown("### 📊 Resumen de Facturación")
+
+        # Obtener toda la facturación
+        df_fact = get_facturacion()
+
+        if len(df_fact) == 0:
+            st.info("📭 No hay facturación registrada. Introduce datos en la pestaña anterior.")
+            return
+
+        # Tabla pivote: mes vs vehículo
+        resumen = df_fact.groupby(['mes', 'vehiculo_id']).agg({
+            'importe': 'sum'
+        }).reset_index()
+
+        # Crear tabla pivote
+        pivot = resumen.pivot(index='mes', columns='vehiculo_id', values='importe').fillna(0)
+
+        # Añadir columna de total
+        pivot['TOTAL'] = pivot.sum(axis=1)
+
+        # Ordenar por mes descendente
+        pivot = pivot.sort_index(ascending=False)
+
+        # Formatear valores
+        pivot_formatted = pivot.copy()
+        for col in pivot_formatted.columns:
+            pivot_formatted[col] = pivot_formatted[col].apply(lambda x: formato_importe_es(x) if x > 0 else '-')
+
+        st.markdown("#### Facturación por Vehículo/Mes")
+        st.dataframe(pivot_formatted, use_container_width=True)
+
+        # Métricas totales
+        st.markdown("---")
+        st.markdown("#### Totales por Vehículo")
+
+        totales_vehiculo = df_fact.groupby('vehiculo_id')['importe'].sum()
+
+        cols = st.columns(len(totales_vehiculo) + 1)
+        for i, (veh, total) in enumerate(totales_vehiculo.items()):
+            with cols[i]:
+                st.metric(veh, formato_importe_es(total))
+
+        with cols[-1]:
+            st.metric("TOTAL", formato_importe_es(totales_vehiculo.sum()))
+
+        # Media mensual
+        st.markdown("---")
+        meses_con_datos = len(pivot)
+        if meses_con_datos > 0:
+            media_mensual = totales_vehiculo.sum() / meses_con_datos
+            st.metric("Media mensual", formato_importe_es(media_mensual), f"({meses_con_datos} meses)")
 
 
 # ============== PÁGINA: FACTURAS COMBUSTIBLE/PEAJES ==============
@@ -745,6 +1684,12 @@ def main():
         pagina_importar()
     elif pagina == "facturas":
         pagina_facturas()
+    elif pagina == "registros":
+        pagina_registros()
+    elif pagina == "costes_laborales":
+        pagina_costes_laborales()
+    elif pagina == "facturacion":
+        pagina_facturacion()
     elif pagina == "config":
         pagina_config()
 

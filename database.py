@@ -87,10 +87,60 @@ def init_database():
         )
     """)
 
+    # Tabla de amortizaciones por activo
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS amortizaciones (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            activo TEXT NOT NULL,
+            matricula TEXT,
+            vehiculo_id TEXT,
+            amortizacion_anual REAL NOT NULL,
+            amortizacion_mensual REAL NOT NULL,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (vehiculo_id) REFERENCES vehiculos(id)
+        )
+    """)
+
+    # Tabla de costes laborales
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS costes_laborales (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            mes TEXT NOT NULL,
+            trabajador_id INTEGER NOT NULL,
+            nombre TEXT NOT NULL,
+            vehiculo_id TEXT,
+            bruto REAL DEFAULT 0,
+            ss_trabajador REAL DEFAULT 0,
+            irpf REAL DEFAULT 0,
+            liquido REAL DEFAULT 0,
+            ss_empresa REAL DEFAULT 0,
+            coste_total REAL DEFAULT 0,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (vehiculo_id) REFERENCES vehiculos(id),
+            UNIQUE(mes, trabajador_id)
+        )
+    """)
+
+    # Tabla de facturación
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS facturacion (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            mes TEXT NOT NULL,
+            vehiculo_id TEXT NOT NULL,
+            importe REAL NOT NULL,
+            descripcion TEXT,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (vehiculo_id) REFERENCES vehiculos(id),
+            UNIQUE(mes, vehiculo_id)
+        )
+    """)
+
     # Índices para mejorar rendimiento
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_movimientos_fecha ON movimientos(fecha)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_movimientos_vehiculo ON movimientos(vehiculo_id)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_movimientos_categoria ON movimientos(categoria_id)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_costes_laborales_mes ON costes_laborales(mes)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_costes_laborales_vehiculo ON costes_laborales(vehiculo_id)")
 
     conn.commit()
 
@@ -406,6 +456,363 @@ def eliminar_regla(regla_id: int):
     cursor.execute("UPDATE reglas SET activa = 0 WHERE id = ?", (regla_id,))
     conn.commit()
     conn.close()
+
+
+# ============== FUNCIONES DE AMORTIZACIONES ==============
+
+def get_amortizaciones() -> pd.DataFrame:
+    """Obtiene todas las amortizaciones."""
+    conn = get_connection()
+    df = pd.read_sql_query("""
+        SELECT a.*, v.descripcion as vehiculo_descripcion
+        FROM amortizaciones a
+        LEFT JOIN vehiculos v ON a.vehiculo_id = v.id
+        ORDER BY a.activo
+    """, conn)
+    conn.close()
+    return df
+
+
+def guardar_amortizaciones(amortizaciones: list[dict]):
+    """Guarda o actualiza las amortizaciones."""
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    # Limpiar tabla existente
+    cursor.execute("DELETE FROM amortizaciones")
+
+    # Insertar nuevas amortizaciones
+    for a in amortizaciones:
+        cursor.execute("""
+            INSERT INTO amortizaciones (activo, matricula, vehiculo_id, amortizacion_anual, amortizacion_mensual)
+            VALUES (?, ?, ?, ?, ?)
+        """, (
+            a.get('activo'),
+            a.get('matricula'),
+            a.get('vehiculo_id'),
+            a.get('amortizacion_anual'),
+            a.get('amortizacion_mensual')
+        ))
+
+    conn.commit()
+    conn.close()
+
+
+def inicializar_amortizaciones_default():
+    """Inicializa amortizaciones con valores por defecto si la tabla está vacía."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT COUNT(*) FROM amortizaciones")
+    count = cursor.fetchone()[0]
+
+    if count == 0:
+        amortizaciones_default = [
+            ("CAMIÓN IVECO", "1257MTY", "MTY", 17600, 1466.67),
+            ("CAMIÓN RENAULT", "1382LVX", "LVX", 19600, 1633.33),
+            ("CISTERNA LVX", "1382LVX", "LVX", 6320, 526.67),
+            ("CAMIÓN RENAULT T460", "9245MJC", "MJC", 9360, 780.00),
+            ("SEMIRREMOLQUE", "R8985BDN", "COMÚN", 4865, 405.42),
+            ("COCHE MERCEDES", "5014LRH", "COMÚN", 4627, 385.58),
+            ("CARRETILLA", "-", "COMÚN", 180, 15.00),
+        ]
+
+        for a in amortizaciones_default:
+            cursor.execute("""
+                INSERT INTO amortizaciones (activo, matricula, vehiculo_id, amortizacion_anual, amortizacion_mensual)
+                VALUES (?, ?, ?, ?, ?)
+            """, a)
+
+        conn.commit()
+
+    conn.close()
+
+
+# ============== FUNCIONES DE COSTES LABORALES ==============
+
+def get_costes_laborales(mes: Optional[str] = None, vehiculo_id: Optional[str] = None) -> pd.DataFrame:
+    """Obtiene costes laborales con filtros opcionales."""
+    conn = get_connection()
+
+    query = """
+        SELECT cl.*, v.descripcion as vehiculo_descripcion
+        FROM costes_laborales cl
+        LEFT JOIN vehiculos v ON cl.vehiculo_id = v.id
+        WHERE 1=1
+    """
+    params = []
+
+    if mes:
+        query += " AND cl.mes = ?"
+        params.append(mes)
+
+    if vehiculo_id:
+        query += " AND cl.vehiculo_id = ?"
+        params.append(vehiculo_id)
+
+    query += " ORDER BY cl.mes DESC, cl.trabajador_id"
+
+    df = pd.read_sql_query(query, conn, params=params)
+    conn.close()
+    return df
+
+
+def insertar_coste_laboral(coste: dict) -> int:
+    """Inserta o actualiza un coste laboral."""
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    cursor.execute("""
+        INSERT OR REPLACE INTO costes_laborales
+        (mes, trabajador_id, nombre, vehiculo_id, bruto, ss_trabajador, irpf, liquido, ss_empresa, coste_total)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, (
+        coste.get('mes'),
+        coste.get('trabajador_id'),
+        coste.get('nombre'),
+        coste.get('vehiculo_id'),
+        coste.get('bruto', 0),
+        coste.get('ss_trabajador', 0),
+        coste.get('irpf', 0),
+        coste.get('liquido', 0),
+        coste.get('ss_empresa', 0),
+        coste.get('coste_total', 0)
+    ))
+
+    coste_id = cursor.lastrowid
+    conn.commit()
+    conn.close()
+
+    return coste_id
+
+
+def insertar_costes_laborales_batch(costes: list[dict]) -> int:
+    """Inserta múltiples costes laborales."""
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    for coste in costes:
+        cursor.execute("""
+            INSERT OR REPLACE INTO costes_laborales
+            (mes, trabajador_id, nombre, vehiculo_id, bruto, ss_trabajador, irpf, liquido, ss_empresa, coste_total)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            coste.get('mes'),
+            coste.get('trabajador_id'),
+            coste.get('nombre'),
+            coste.get('vehiculo_id'),
+            coste.get('bruto', 0),
+            coste.get('ss_trabajador', 0),
+            coste.get('irpf', 0),
+            coste.get('liquido', 0),
+            coste.get('ss_empresa', 0),
+            coste.get('coste_total', 0)
+        ))
+
+    conn.commit()
+    conn.close()
+
+    return len(costes)
+
+
+def get_resumen_costes_por_vehiculo() -> pd.DataFrame:
+    """Obtiene resumen de costes laborales agrupados por mes y vehículo."""
+    conn = get_connection()
+    df = pd.read_sql_query("""
+        SELECT
+            mes,
+            vehiculo_id,
+            SUM(coste_total) as total_coste
+        FROM costes_laborales
+        GROUP BY mes, vehiculo_id
+        ORDER BY mes DESC, vehiculo_id
+    """, conn)
+    conn.close()
+    return df
+
+
+def eliminar_coste_laboral(coste_id: int):
+    """Elimina un coste laboral."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM costes_laborales WHERE id = ?", (coste_id,))
+    conn.commit()
+    conn.close()
+
+
+# ============== FUNCIONES DE BORRADO DE MOVIMIENTOS ==============
+
+def eliminar_movimientos(ids: list[int]) -> int:
+    """Elimina múltiples movimientos por sus IDs."""
+    if not ids:
+        return 0
+
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    placeholders = ','.join('?' * len(ids))
+    cursor.execute(f"DELETE FROM movimientos WHERE id IN ({placeholders})", ids)
+
+    deleted = cursor.rowcount
+    conn.commit()
+    conn.close()
+
+    return deleted
+
+
+def get_movimientos_con_filtros(
+    fecha_desde: Optional[str] = None,
+    fecha_hasta: Optional[str] = None,
+    vehiculos: Optional[list[str]] = None,
+    categorias: Optional[list[str]] = None,
+    tipo: Optional[str] = None,
+    limit: int = 50,
+    offset: int = 0
+) -> tuple[pd.DataFrame, int]:
+    """
+    Obtiene movimientos con filtros avanzados y paginación.
+    Retorna (DataFrame, total_count).
+    """
+    conn = get_connection()
+
+    # Query base
+    where_clauses = ["1=1"]
+    params = []
+
+    if fecha_desde:
+        where_clauses.append("m.fecha >= ?")
+        params.append(fecha_desde)
+
+    if fecha_hasta:
+        where_clauses.append("m.fecha <= ?")
+        params.append(fecha_hasta)
+
+    if vehiculos and len(vehiculos) > 0:
+        placeholders = ','.join('?' * len(vehiculos))
+        where_clauses.append(f"m.vehiculo_id IN ({placeholders})")
+        params.extend(vehiculos)
+
+    if categorias and len(categorias) > 0:
+        placeholders = ','.join('?' * len(categorias))
+        where_clauses.append(f"m.categoria_id IN ({placeholders})")
+        params.extend(categorias)
+
+    if tipo == 'Ingresos':
+        where_clauses.append("m.importe > 0")
+    elif tipo == 'Gastos':
+        where_clauses.append("m.importe < 0")
+
+    where_sql = " AND ".join(where_clauses)
+
+    # Contar total
+    count_query = f"""
+        SELECT COUNT(*) FROM movimientos m
+        LEFT JOIN categorias c ON m.categoria_id = c.id
+        WHERE {where_sql}
+    """
+    cursor = conn.cursor()
+    cursor.execute(count_query, params)
+    total_count = cursor.fetchone()[0]
+
+    # Obtener datos paginados
+    data_query = f"""
+        SELECT
+            m.id,
+            m.fecha,
+            m.descripcion,
+            m.importe,
+            m.categoria_id,
+            c.nombre as categoria_nombre,
+            m.vehiculo_id,
+            v.descripcion as vehiculo_descripcion
+        FROM movimientos m
+        LEFT JOIN categorias c ON m.categoria_id = c.id
+        LEFT JOIN vehiculos v ON m.vehiculo_id = v.id
+        WHERE {where_sql}
+        ORDER BY m.fecha DESC, m.id DESC
+        LIMIT ? OFFSET ?
+    """
+
+    df = pd.read_sql_query(data_query, conn, params=params + [limit, offset])
+    conn.close()
+
+    return df, total_count
+
+
+# ============== FUNCIONES DE FACTURACIÓN ==============
+
+def get_facturacion(mes: Optional[str] = None, vehiculo_id: Optional[str] = None) -> pd.DataFrame:
+    """Obtiene facturación con filtros opcionales."""
+    conn = get_connection()
+
+    query = """
+        SELECT f.*, v.descripcion as vehiculo_descripcion
+        FROM facturacion f
+        LEFT JOIN vehiculos v ON f.vehiculo_id = v.id
+        WHERE 1=1
+    """
+    params = []
+
+    if mes:
+        query += " AND f.mes = ?"
+        params.append(mes)
+
+    if vehiculo_id:
+        query += " AND f.vehiculo_id = ?"
+        params.append(vehiculo_id)
+
+    query += " ORDER BY f.mes DESC, f.vehiculo_id"
+
+    df = pd.read_sql_query(query, conn, params=params)
+    conn.close()
+    return df
+
+
+def insertar_facturacion(factura: dict) -> int:
+    """Inserta o actualiza una facturación."""
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    cursor.execute("""
+        INSERT OR REPLACE INTO facturacion
+        (mes, vehiculo_id, importe, descripcion)
+        VALUES (?, ?, ?, ?)
+    """, (
+        factura.get('mes'),
+        factura.get('vehiculo_id'),
+        factura.get('importe', 0),
+        factura.get('descripcion')
+    ))
+
+    factura_id = cursor.lastrowid
+    conn.commit()
+    conn.close()
+
+    return factura_id
+
+
+def eliminar_facturacion(factura_id: int):
+    """Elimina una facturación."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM facturacion WHERE id = ?", (factura_id,))
+    conn.commit()
+    conn.close()
+
+
+def get_resumen_facturacion_por_vehiculo() -> pd.DataFrame:
+    """Obtiene resumen de facturación agrupado por mes y vehículo."""
+    conn = get_connection()
+    df = pd.read_sql_query("""
+        SELECT
+            mes,
+            vehiculo_id,
+            SUM(importe) as total_facturacion
+        FROM facturacion
+        GROUP BY mes, vehiculo_id
+        ORDER BY mes DESC, vehiculo_id
+    """, conn)
+    conn.close()
+    return df
 
 
 # Inicializar base de datos al importar el módulo
