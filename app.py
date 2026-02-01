@@ -516,8 +516,86 @@ def pagina_importar():
 
 # ============== PÁGINA: RESUMEN ==============
 
+def crear_gauge_rentabilidad(valor, titulo, max_valor=30):
+    """Crea un gauge de rentabilidad con Plotly."""
+    import plotly.graph_objects as go
+
+    fig = go.Figure(go.Indicator(
+        mode="gauge+number",
+        value=valor,
+        number={'suffix': '%', 'font': {'size': 36}},
+        title={'text': titulo, 'font': {'size': 16, 'color': '#1f4e79'}},
+        gauge={
+            'axis': {'range': [-10, max_valor], 'ticksuffix': '%', 'tickfont': {'size': 10}},
+            'bar': {'color': "#1F4E79"},
+            'bgcolor': "white",
+            'borderwidth': 2,
+            'bordercolor': "#cccccc",
+            'steps': [
+                {'range': [-10, 0], 'color': '#ffcccc'},   # Rojo claro (pérdidas)
+                {'range': [0, 10], 'color': '#ffffcc'},    # Amarillo (margen bajo)
+                {'range': [10, 20], 'color': '#ccffcc'},   # Verde claro (aceptable)
+                {'range': [20, max_valor], 'color': '#66ff66'},   # Verde (bueno)
+            ],
+            'threshold': {
+                'line': {'color': "red", 'width': 2},
+                'thickness': 0.75,
+                'value': 0
+            }
+        }
+    ))
+    fig.update_layout(
+        height=220,
+        margin=dict(l=20, r=20, t=50, b=20),
+        paper_bgcolor='rgba(0,0,0,0)',
+        font={'color': '#1f4e79'}
+    )
+    return fig
+
+
+def calcular_rentabilidad_vehiculo(vehiculo_id: str = None):
+    """
+    Calcula la rentabilidad de un vehículo o total.
+    Retorna: facturacion, resultado_neto, margen_pct, periodo
+    """
+    # Obtener facturación
+    df_fact = get_facturacion(vehiculo_id=vehiculo_id) if vehiculo_id else get_facturacion()
+    facturacion_total = df_fact['importe'].sum() if len(df_fact) > 0 else 0
+
+    # Obtener P&L
+    df_pnl = calcular_pnl_vehiculo(vehiculo_id)
+    resultado_neto = df_pnl['neto'].sum() if len(df_pnl) > 0 else 0
+
+    # Calcular margen
+    if facturacion_total > 0:
+        margen_pct = (resultado_neto / facturacion_total) * 100
+    else:
+        margen_pct = 0
+
+    # Calcular periodo
+    periodo = "Sin datos"
+    if len(df_pnl) > 0:
+        meses = df_pnl['mes'].sort_values()
+        mes_inicio = meses.iloc[0] if len(meses) > 0 else ""
+        mes_fin = meses.iloc[-1] if len(meses) > 0 else ""
+        if mes_inicio and mes_fin:
+            # Formatear: 2025-01 -> Ene 2025
+            meses_nombres = ['Ene', 'Feb', 'Mar', 'Abr', 'May', 'Jun',
+                           'Jul', 'Ago', 'Sep', 'Oct', 'Nov', 'Dic']
+            try:
+                ini_parts = mes_inicio.split('-')
+                fin_parts = mes_fin.split('-')
+                ini_str = f"{meses_nombres[int(ini_parts[1])-1]} {ini_parts[0]}"
+                fin_str = f"{meses_nombres[int(fin_parts[1])-1]} {fin_parts[0]}"
+                periodo = f"{ini_str} - {fin_str}" if mes_inicio != mes_fin else ini_str
+            except (IndexError, ValueError):
+                periodo = f"{mes_inicio} - {mes_fin}"
+
+    return facturacion_total, resultado_neto, margen_pct, periodo
+
+
 def pagina_resumen():
-    """Vista de resumen general."""
+    """Vista de resumen general con gauges de rentabilidad."""
     st.markdown('<p class="main-header">🏠 Resumen</p>', unsafe_allow_html=True)
     st.markdown('<p class="sub-header">Dashboard consolidado de la flota</p>', unsafe_allow_html=True)
 
@@ -527,7 +605,102 @@ def pagina_resumen():
         st.info("📭 No hay movimientos importados. Ve a la sección **Importar** para cargar datos.")
         return
 
-    st.info("🚧 Vista en desarrollo. Próximamente: KPIs, gráficos de barras y evolución mensual.")
+    # Verificar si hay facturación
+    df_facturacion = get_facturacion()
+    if len(df_facturacion) == 0:
+        st.warning("⚠️ No hay facturación registrada. Ve a **💰 Facturación** para introducir datos y calcular la rentabilidad.")
+
+    # ========== SECCIÓN DE GAUGES DE RENTABILIDAD ==========
+    st.markdown("---")
+    st.subheader("📊 Rentabilidad Acumulada")
+
+    # Vehículos operativos
+    vehiculos = ["MTY", "LVX", "MJC", "MLB"]
+
+    # Calcular rentabilidad por vehículo
+    datos_vehiculos = {}
+    for veh in vehiculos:
+        fact, neto, margen, periodo = calcular_rentabilidad_vehiculo(veh)
+        datos_vehiculos[veh] = {
+            'facturacion': fact,
+            'neto': neto,
+            'margen': margen,
+            'periodo': periodo
+        }
+
+    # Calcular rentabilidad total
+    fact_total, neto_total, margen_total, periodo_total = calcular_rentabilidad_vehiculo(None)
+
+    # Fila superior: 4 gauges pequeños (uno por vehículo)
+    col1, col2, col3, col4 = st.columns(4)
+
+    columnas = [col1, col2, col3, col4]
+    for i, veh in enumerate(vehiculos):
+        with columnas[i]:
+            datos = datos_vehiculos[veh]
+            fig = crear_gauge_rentabilidad(datos['margen'], veh)
+            st.plotly_chart(fig, use_container_width=True)
+
+            # Datos debajo del gauge
+            st.markdown(f"""
+            <div style='text-align: center; font-size: 0.85rem; color: #666;'>
+                <strong>Facturación:</strong> {formato_importe_es(datos['facturacion'])}<br>
+                <strong>Resultado:</strong> <span style='color: {"green" if datos["neto"] >= 0 else "red"}'>{formato_importe_es(datos['neto'])}</span>
+            </div>
+            """, unsafe_allow_html=True)
+
+    st.markdown("---")
+
+    # Fila inferior: Gauge grande central (total empresa)
+    col_izq, col_centro, col_der = st.columns([1, 2, 1])
+
+    with col_centro:
+        fig_total = crear_gauge_rentabilidad(margen_total, "TOTAL EMPRESA", max_valor=25)
+        fig_total.update_layout(height=320)
+        st.plotly_chart(fig_total, use_container_width=True)
+
+        # Datos del total
+        st.markdown(f"""
+        <div style='text-align: center; font-size: 1rem; color: #333;'>
+            <strong>Facturación Total:</strong> {formato_importe_es(fact_total)}<br>
+            <strong>Resultado Neto:</strong> <span style='color: {"green" if neto_total >= 0 else "red"}; font-weight: bold;'>{formato_importe_es(neto_total)}</span><br>
+            <strong>Período:</strong> {periodo_total}
+        </div>
+        """, unsafe_allow_html=True)
+
+    # Leyenda de colores
+    st.markdown("---")
+    st.markdown("""
+    <div style='text-align: center; font-size: 0.8rem; color: #666;'>
+        <span style='background-color: #ffcccc; padding: 2px 8px; border-radius: 3px;'>< 0% Pérdidas</span>
+        <span style='background-color: #ffffcc; padding: 2px 8px; border-radius: 3px; margin-left: 10px;'>0-10% Bajo</span>
+        <span style='background-color: #ccffcc; padding: 2px 8px; border-radius: 3px; margin-left: 10px;'>10-20% Aceptable</span>
+        <span style='background-color: #66ff66; padding: 2px 8px; border-radius: 3px; margin-left: 10px;'>> 20% Bueno</span>
+    </div>
+    """, unsafe_allow_html=True)
+
+    # ========== RESUMEN RÁPIDO ==========
+    st.markdown("---")
+    st.subheader("📈 Resumen Rápido")
+
+    # Métricas generales
+    total_movimientos = len(movimientos)
+    total_ingresos = movimientos[movimientos['importe'] > 0]['importe'].sum()
+    total_gastos = movimientos[movimientos['importe'] < 0]['importe'].sum()
+
+    col_m1, col_m2, col_m3, col_m4 = st.columns(4)
+
+    with col_m1:
+        st.metric("Total Movimientos", f"{total_movimientos:,}")
+    with col_m2:
+        st.metric("Ingresos", formato_importe_es(total_ingresos))
+    with col_m3:
+        st.metric("Gastos", formato_importe_es(abs(total_gastos)))
+    with col_m4:
+        balance = total_ingresos + total_gastos
+        st.metric("Balance", formato_importe_es(balance),
+                 delta="Positivo" if balance >= 0 else "Negativo",
+                 delta_color="normal" if balance >= 0 else "inverse")
 
 
 # ============== PÁGINA: POR VEHÍCULO ==============
