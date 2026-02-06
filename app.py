@@ -21,6 +21,8 @@ from importador import (
     validar_importacion, detectar_duplicados
 )
 from importador_facturas import parsear_factura_pdf, generar_movimientos_para_db
+from importador_costes import parsear_pdf_costes_laborales, TRABAJADORES
+from importar_todo import pagina_importar_todo, obtener_estado_checklist_mes
 
 # Para parseo de PDF de costes laborales
 import pdfplumber
@@ -87,6 +89,7 @@ def render_sidebar():
 
     paginas = {
         "🏠 Resumen": "resumen",
+        "📦 Importar Todo": "importar_todo",
         "🚛 Por Vehículo": "vehiculo",
         "📥 Importar CSV": "importar",
         "⛽ Combustible/Peajes": "facturas",
@@ -104,49 +107,21 @@ def render_sidebar():
 
     st.sidebar.markdown("---")
 
-    # Checklist de tareas mensuales
-    st.sidebar.markdown("### 📝 Tareas del mes")
-
-    # Inicializar estado de checklist si no existe
-    if 'checklist_gasoil' not in st.session_state:
-        st.session_state.checklist_gasoil = False
-    if 'checklist_costes_laborales' not in st.session_state:
-        st.session_state.checklist_costes_laborales = False
-    if 'checklist_banco' not in st.session_state:
-        st.session_state.checklist_banco = False
-    if 'checklist_facturacion' not in st.session_state:
-        st.session_state.checklist_facturacion = False
-
-    st.session_state.checklist_gasoil = st.sidebar.checkbox(
-        "⛽ Gasoil",
-        value=st.session_state.checklist_gasoil,
-        key="check_gasoil"
-    )
-    st.session_state.checklist_costes_laborales = st.sidebar.checkbox(
-        "👷 Costes laborales",
-        value=st.session_state.checklist_costes_laborales,
-        key="check_costes"
-    )
-    st.session_state.checklist_banco = st.sidebar.checkbox(
-        "🏦 Fichero banco",
-        value=st.session_state.checklist_banco,
-        key="check_banco"
-    )
-    st.session_state.checklist_facturacion = st.sidebar.checkbox(
-        "📄 Facturación",
-        value=st.session_state.checklist_facturacion,
-        key="check_facturacion"
-    )
-
-    # Mostrar progreso
-    tareas_completadas = sum([
-        st.session_state.checklist_gasoil,
-        st.session_state.checklist_costes_laborales,
-        st.session_state.checklist_banco,
-        st.session_state.checklist_facturacion
-    ])
-    st.sidebar.progress(tareas_completadas / 4)
-    st.sidebar.caption(f"{tareas_completadas}/4 tareas completadas")
+    # Estado del mes (automatizado desde BD)
+    st.sidebar.markdown("### 📝 Estado del mes")
+    mes_actual = datetime.now().strftime('%Y-%m')
+    try:
+        estado_items = obtener_estado_checklist_mes(mes_actual)
+        obligatorios = [i for i in estado_items if i['obligatorio']]
+        completados = sum(1 for i in obligatorios if i['estado'] in ('importado', 'detectado'))
+        total_oblig = len(obligatorios)
+        st.sidebar.progress(completados / total_oblig if total_oblig > 0 else 0)
+        st.sidebar.caption(f"{completados}/{total_oblig} documentos importados")
+        for item in obligatorios:
+            icono_estado = "\u2705" if item['estado'] == 'importado' else ("\u26a0\ufe0f" if item['estado'] == 'detectado' else "\u274c")
+            st.sidebar.caption(f"{icono_estado} {item['icono']} {item['nombre']}")
+    except Exception:
+        st.sidebar.caption("Error al cargar estado")
 
     st.sidebar.markdown("---")
     st.sidebar.caption(f"v2.0 | {datetime.now().strftime('%Y')}")
@@ -173,6 +148,7 @@ def pagina_importar():
 
     st.markdown('<p class="main-header">📥 Importar Extracto Bancario</p>', unsafe_allow_html=True)
     st.markdown('<p class="sub-header">Carga extractos CSV de Abanca para categorizar movimientos</p>', unsafe_allow_html=True)
+    st.info("Tambien puedes usar **📦 Importar Todo** para importar todos los documentos del mes de una vez.")
 
     # Estado de sesión
     if 'df_importacion' not in st.session_state:
@@ -1412,103 +1388,12 @@ def pagina_registros():
 
 # ============== PÁGINA: COSTES LABORALES ==============
 
-# Mapeo de trabajadores a vehículos
-TRABAJADORES = {
-    1: {"nombre": "SEVERINO", "vehiculo": "MLB"},
-    2: {"nombre": "JOSE MANUEL", "vehiculo": "LVX"},
-    3: {"nombre": "CARLOS", "vehiculo": "MJC"},
-    4: {"nombre": "JESUS", "vehiculo": "MTY"},
-    5: {"nombre": "MERCEDES BEGOÑA", "vehiculo": "COMÚN"},
-    8: {"nombre": "SUSANA", "vehiculo": "COMÚN"},
-}
-
-
-def parsear_pdf_costes_laborales(pdf_bytes, filename):
-    """
-    Parsea un PDF de costes laborales con formato COST_YYYYMM_Emp_65.pdf
-    Extrae: nombre, bruto, ss_trabajador, irpf, liquido, ss_empresa, coste_total
-    """
-    resultados = []
-    errores = []
-
-    # Extraer mes del nombre del archivo (formato COST_YYYYMM_...)
-    mes_match = re.search(r'COST_(\d{6})', filename)
-    if mes_match:
-        year_month = mes_match.group(1)
-        mes = f"{year_month[:4]}-{year_month[4:6]}"  # Formato YYYY-MM
-    else:
-        errores.append(f"No se pudo extraer el mes del nombre del archivo: {filename}")
-        return resultados, errores, None
-
-    try:
-        import io
-        with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
-            texto_completo = ""
-            for page in pdf.pages:
-                texto_completo += page.extract_text() or ""
-
-            # Buscar líneas que empiecen con números del 1-8 (ID de trabajador)
-            lineas = texto_completo.split('\n')
-
-            for linea in lineas:
-                linea = linea.strip()
-                if not linea:
-                    continue
-
-                # Buscar patrón: número al inicio seguido de nombre
-                match = re.match(r'^(\d)\s+(.+)', linea)
-                if match:
-                    trabajador_id = int(match.group(1))
-
-                    if trabajador_id not in TRABAJADORES:
-                        continue
-
-                    # Extraer números de la línea (valores monetarios)
-                    # Buscar todos los números con decimales
-                    numeros = re.findall(r'[\d.,]+', linea)
-
-                    # Filtrar y convertir números
-                    valores = []
-                    for num in numeros:
-                        try:
-                            # Convertir formato español a float
-                            num_clean = num.replace('.', '').replace(',', '.')
-                            val = float(num_clean)
-                            if val > 0:  # Solo valores positivos significativos
-                                valores.append(val)
-                        except ValueError:
-                            continue
-
-                    # Estructura esperada: bruto, ss_trab, irpf, liquido, ss_emp, coste_total
-                    # El orden puede variar según el PDF
-                    if len(valores) >= 6:
-                        trabajador_info = TRABAJADORES[trabajador_id]
-
-                        # Asumimos el orden más común en nóminas
-                        resultado = {
-                            'mes': mes,
-                            'trabajador_id': trabajador_id,
-                            'nombre': trabajador_info['nombre'],
-                            'vehiculo_id': trabajador_info['vehiculo'],
-                            'bruto': valores[0] if len(valores) > 0 else 0,
-                            'ss_trabajador': valores[1] if len(valores) > 1 else 0,
-                            'irpf': valores[2] if len(valores) > 2 else 0,
-                            'liquido': valores[3] if len(valores) > 3 else 0,
-                            'ss_empresa': valores[4] if len(valores) > 4 else 0,
-                            'coste_total': valores[5] if len(valores) > 5 else 0,
-                        }
-                        resultados.append(resultado)
-
-    except Exception as e:
-        errores.append(f"Error procesando PDF: {str(e)}")
-
-    return resultados, errores, mes
-
 
 def pagina_costes_laborales():
     """Vista de gestión de costes laborales."""
     st.markdown('<p class="main-header">👷 Costes Laborales</p>', unsafe_allow_html=True)
     st.markdown('<p class="sub-header">Importa y gestiona los costes laborales por trabajador y vehículo</p>', unsafe_allow_html=True)
+    st.info("Tambien puedes usar **📦 Importar Todo** para importar todos los documentos del mes de una vez.")
 
     # Estado de sesión
     if 'costes_preview' not in st.session_state:
@@ -1521,13 +1406,13 @@ def pagina_costes_laborales():
 
     with tab1:
         st.markdown("### 📄 Importar PDF de Costes")
-        st.caption("Sube un PDF con formato COST_YYYYMM_Emp_65.pdf")
+        st.caption("Sube un PDF con formato COST_YYYYMM_Emp_65.pdf o COST - YYYYMM - Emp 65.pdf")
 
         archivo_pdf = st.file_uploader(
             "Selecciona archivo PDF",
             type=['pdf'],
             key="pdf_costes",
-            help="Formato esperado: COST_YYYYMM_Emp_65.pdf (ej: COST_202401_Emp_65.pdf)"
+            help="Formato esperado: COST_YYYYMM_Emp_65.pdf o COST - YYYYMM - Emp 65.pdf"
         )
 
         if archivo_pdf is not None:
@@ -1922,6 +1807,7 @@ def pagina_facturas():
 
     st.markdown('<p class="main-header">⛽ Facturas Combustible y Peajes</p>', unsafe_allow_html=True)
     st.markdown('<p class="sub-header">Importa facturas PDF de StarOil, Solred/Waylet y Valcarce</p>', unsafe_allow_html=True)
+    st.info("Tambien puedes usar **📦 Importar Todo** para importar todos los documentos del mes de una vez.")
 
     # Estado de sesión para facturas
     if 'facturas_procesadas' not in st.session_state:
@@ -2153,6 +2039,8 @@ def main():
 
     if pagina == "resumen":
         pagina_resumen()
+    elif pagina == "importar_todo":
+        pagina_importar_todo()
     elif pagina == "vehiculo":
         pagina_vehiculo()
     elif pagina == "importar":

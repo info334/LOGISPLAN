@@ -87,6 +87,30 @@ def init_database():
         )
     """)
 
+    # Migración: añadir columnas nuevas a importaciones
+    for col_sql in [
+        "ALTER TABLE importaciones ADD COLUMN tipo TEXT",
+        "ALTER TABLE importaciones ADD COLUMN hash_archivo TEXT",
+        "ALTER TABLE importaciones ADD COLUMN mes_referencia TEXT",
+    ]:
+        try:
+            cursor.execute(col_sql)
+        except sqlite3.OperationalError:
+            pass  # La columna ya existe
+
+    # Tabla de checklist de documentos mensuales
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS checklist_documentos (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            mes TEXT NOT NULL,
+            tipo_documento TEXT NOT NULL,
+            estado TEXT DEFAULT 'pendiente',
+            notas TEXT,
+            fecha_registro DATETIME DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(mes, tipo_documento)
+        )
+    """)
+
     # Tabla de amortizaciones por activo
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS amortizaciones (
@@ -141,6 +165,7 @@ def init_database():
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_movimientos_categoria ON movimientos(categoria_id)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_costes_laborales_mes ON costes_laborales(mes)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_costes_laborales_vehiculo ON costes_laborales(vehiculo_id)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_importaciones_mes_tipo ON importaciones(mes_referencia, tipo)")
 
     conn.commit()
 
@@ -358,7 +383,9 @@ def get_periodos_disponibles() -> list:
 
 # ============== FUNCIONES DE INSERCIÓN ==============
 
-def insertar_movimientos(movimientos: list[dict], archivo_nombre: str = None) -> int:
+def insertar_movimientos(movimientos: list[dict], archivo_nombre: str = None,
+                         tipo: str = None, hash_archivo: str = None,
+                         mes_referencia: str = None) -> int:
     """
     Inserta múltiples movimientos en la base de datos.
     Retorna el ID de la importación.
@@ -372,9 +399,11 @@ def insertar_movimientos(movimientos: list[dict], archivo_nombre: str = None) ->
     periodo_hasta = max(fechas) if fechas else None
 
     cursor.execute("""
-        INSERT INTO importaciones (archivo_nombre, num_movimientos, periodo_desde, periodo_hasta)
-        VALUES (?, ?, ?, ?)
-    """, (archivo_nombre, len(movimientos), periodo_desde, periodo_hasta))
+        INSERT INTO importaciones (archivo_nombre, num_movimientos, periodo_desde, periodo_hasta,
+                                   tipo, hash_archivo, mes_referencia)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+    """, (archivo_nombre, len(movimientos), periodo_desde, periodo_hasta,
+          tipo, hash_archivo, mes_referencia))
 
     importacion_id = cursor.lastrowid
 
@@ -813,6 +842,86 @@ def get_resumen_facturacion_por_vehiculo() -> pd.DataFrame:
     """, conn)
     conn.close()
     return df
+
+
+# ============== FUNCIONES PARA IMPORTAR TODO ==============
+
+def insertar_importacion_tipada(archivo_nombre, num_movimientos, periodo_desde,
+                                 periodo_hasta, tipo, hash_archivo, mes_referencia):
+    """Inserta un registro de importación con tipo y hash (sin movimientos asociados)."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("""
+        INSERT INTO importaciones
+        (archivo_nombre, num_movimientos, periodo_desde, periodo_hasta, tipo, hash_archivo, mes_referencia)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+    """, (archivo_nombre, num_movimientos, periodo_desde, periodo_hasta,
+          tipo, hash_archivo, mes_referencia))
+    importacion_id = cursor.lastrowid
+    conn.commit()
+    conn.close()
+    return importacion_id
+
+
+def verificar_hash_duplicado(hash_archivo):
+    """Comprueba si un archivo con este hash ya fue importado."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT id, archivo_nombre, fecha_importacion FROM importaciones WHERE hash_archivo = ?",
+        (hash_archivo,)
+    )
+    resultado = cursor.fetchone()
+    conn.close()
+    return dict(resultado) if resultado else None
+
+
+def verificar_nombre_duplicado(archivo_nombre):
+    """Comprueba si un archivo con este nombre ya fue importado."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT id, archivo_nombre, fecha_importacion FROM importaciones WHERE archivo_nombre = ?",
+        (archivo_nombre,)
+    )
+    resultado = cursor.fetchone()
+    conn.close()
+    return dict(resultado) if resultado else None
+
+
+def get_importaciones_por_mes(mes_referencia):
+    """Obtiene todas las importaciones de un mes específico."""
+    conn = get_connection()
+    df = pd.read_sql_query("""
+        SELECT * FROM importaciones
+        WHERE mes_referencia = ?
+        ORDER BY fecha_importacion DESC
+    """, conn, params=[mes_referencia])
+    conn.close()
+    return df
+
+
+def get_checklist_estado(mes):
+    """Obtiene el estado del checklist manual para un mes."""
+    conn = get_connection()
+    df = pd.read_sql_query("""
+        SELECT * FROM checklist_documentos
+        WHERE mes = ?
+    """, conn, params=[mes])
+    conn.close()
+    return df
+
+
+def upsert_checklist_documento(mes, tipo_documento, estado, notas=None):
+    """Inserta o actualiza el estado de un documento en el checklist."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("""
+        INSERT OR REPLACE INTO checklist_documentos (mes, tipo_documento, estado, notas)
+        VALUES (?, ?, ?, ?)
+    """, (mes, tipo_documento, estado, notas))
+    conn.commit()
+    conn.close()
 
 
 # Inicializar base de datos al importar el módulo

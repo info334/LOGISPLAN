@@ -196,9 +196,10 @@ def parsear_staroil(contenido: bytes, resultado: Dict) -> Dict:
 
             # Parsear líneas de combustible - cada repostaje
             # Formato: 1050227643 01/12/25 107727 Gasol A 140,06 1,428 200,00
-            match = re.match(r'(\d{10})\s+(\d{2}/\d{2}/\d{2})\s+\d+\s+(Gasol\s*A|AdBlue)\s+([\d,]+)\s+([\d,]+)\s+([\d,]+)', linea)
+            # También: 1050230083 01/01/26 107727 Diesel 219,14 1,369 300,00
+            match = re.match(r'(\d{10})\s+(\d{2}/\d{2}/\d{2})\s+\d+\s+(Gasol\s*A|Diesel|AdBlue)\s+([\d,]+)\s+([\d,]+)\s+([\d,]+)', linea)
             if match and vehiculo_actual:
-                concepto = 'GASOIL' if 'Gasol' in match.group(3) else 'ADBLUE'
+                concepto = 'ADBLUE' if 'AdBlue' in match.group(3) else 'GASOIL'
                 litros = parsear_numero_es(match.group(4))
                 precio_bruto_iva = parsear_numero_es(match.group(5))  # Precio con IVA
                 importe_con_iva = parsear_numero_es(match.group(6))
