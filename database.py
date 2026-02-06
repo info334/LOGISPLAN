@@ -312,6 +312,7 @@ def _insertar_datos_iniciales(conn: sqlite3.Connection):
         ("SOLRED", "COMB", "Se importa desde factura Solred"),
         ("STAROIL", "COMB", "Se importa desde factura Staroil"),
         ("VALCARCE", "PEAJ", "Se importa desde factura Valcarce"),
+        ("DOCUMENTO", "SAL", "Se importa desde costes laborales (salarios)"),
     ]
     for e in exclusiones:
         cursor.execute("""

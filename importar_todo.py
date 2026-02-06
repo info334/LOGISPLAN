@@ -312,6 +312,7 @@ def obtener_estado_checklist_mes(mes: str) -> list:
     EXCLUSION_A_DOCUMENTO = {
         'TGSS': 'COSTES_LABORALES',
         'COTIZACION': 'COSTES_LABORALES',
+        'DOCUMENTO': 'COSTES_LABORALES',
         'SOLRED': 'FACTURA_SOLRED',
         'STAROIL': 'FACTURA_STAROIL',
         'VALCARCE': 'FACTURA_VALCARCE_PEAJES',
