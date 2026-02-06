@@ -111,6 +111,34 @@ def init_database():
         )
     """)
 
+    # Tabla de exclusiones para importación bancaria
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS exclusiones_banco (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            patron TEXT NOT NULL UNIQUE,
+            categoria_id TEXT NOT NULL,
+            motivo TEXT,
+            activa INTEGER DEFAULT 1,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (categoria_id) REFERENCES categorias(id)
+        )
+    """)
+
+    # Log de movimientos excluidos (auditoría)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS movimientos_excluidos (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            fecha DATE NOT NULL,
+            descripcion TEXT NOT NULL,
+            importe REAL NOT NULL,
+            patron_exclusion TEXT NOT NULL,
+            motivo TEXT,
+            importacion_id INTEGER,
+            mes_referencia TEXT,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+
     # Tabla de amortizaciones por activo
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS amortizaciones (
@@ -276,6 +304,20 @@ def _insertar_datos_iniciales(conn: sqlite3.Connection):
             INSERT OR IGNORE INTO reglas (patron, categoria_id, vehiculo_id)
             VALUES (?, ?, ?)
         """, r)
+
+    # Exclusiones bancarias por defecto
+    exclusiones = [
+        ("TGSS", "SS", "Se importa desde archivo Seguridad Social"),
+        ("COTIZACION", "SS", "Se importa desde archivo Seguridad Social"),
+        ("SOLRED", "COMB", "Se importa desde factura Solred"),
+        ("STAROIL", "COMB", "Se importa desde factura Staroil"),
+        ("VALCARCE", "PEAJ", "Se importa desde factura Valcarce"),
+    ]
+    for e in exclusiones:
+        cursor.execute("""
+            INSERT OR IGNORE INTO exclusiones_banco (patron, categoria_id, motivo)
+            VALUES (?, ?, ?)
+        """, e)
 
     conn.commit()
 
@@ -922,6 +964,93 @@ def upsert_checklist_documento(mes, tipo_documento, estado, notas=None):
     """, (mes, tipo_documento, estado, notas))
     conn.commit()
     conn.close()
+
+
+# ============== FUNCIONES PARA EXCLUSIONES BANCARIAS ==============
+
+def get_exclusiones_banco() -> pd.DataFrame:
+    """Obtiene todas las exclusiones bancarias (activas e inactivas)."""
+    conn = get_connection()
+    df = pd.read_sql_query("""
+        SELECT e.*, c.nombre as categoria_nombre
+        FROM exclusiones_banco e
+        LEFT JOIN categorias c ON e.categoria_id = c.id
+        ORDER BY e.patron
+    """, conn)
+    conn.close()
+    return df
+
+
+def guardar_exclusion_banco(patron, categoria_id, motivo, activa=1):
+    """Inserta o actualiza una regla de exclusion bancaria."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("""
+        INSERT OR REPLACE INTO exclusiones_banco (patron, categoria_id, motivo, activa)
+        VALUES (?, ?, ?, ?)
+    """, (patron.strip().upper(), categoria_id, motivo, activa))
+    conn.commit()
+    conn.close()
+
+
+def eliminar_exclusion_banco(exclusion_id):
+    """Elimina una regla de exclusion bancaria."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM exclusiones_banco WHERE id = ?", (exclusion_id,))
+    conn.commit()
+    conn.close()
+
+
+def toggle_exclusion_banco(exclusion_id, activa):
+    """Activa o desactiva una regla de exclusion bancaria."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("UPDATE exclusiones_banco SET activa = ? WHERE id = ?", (1 if activa else 0, exclusion_id))
+    conn.commit()
+    conn.close()
+
+
+def insertar_movimientos_excluidos(excluidos: list, importacion_id=None, mes_referencia=None):
+    """Registra movimientos excluidos en el log de auditoria."""
+    if not excluidos:
+        return
+    conn = get_connection()
+    cursor = conn.cursor()
+    for exc in excluidos:
+        cursor.execute("""
+            INSERT INTO movimientos_excluidos
+            (fecha, descripcion, importe, patron_exclusion, motivo, importacion_id, mes_referencia)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, (
+            exc.get('fecha'),
+            exc.get('descripcion'),
+            exc.get('importe'),
+            exc.get('patron_exclusion'),
+            exc.get('motivo'),
+            importacion_id,
+            mes_referencia or exc.get('mes_referencia'),
+        ))
+    conn.commit()
+    conn.close()
+
+
+def get_movimientos_excluidos(mes_referencia=None) -> pd.DataFrame:
+    """Obtiene movimientos excluidos con filtro opcional por mes."""
+    conn = get_connection()
+    if mes_referencia:
+        df = pd.read_sql_query("""
+            SELECT * FROM movimientos_excluidos
+            WHERE mes_referencia = ?
+            ORDER BY fecha DESC
+        """, conn, params=[mes_referencia])
+    else:
+        df = pd.read_sql_query("""
+            SELECT * FROM movimientos_excluidos
+            ORDER BY created_at DESC
+        """, conn)
+    conn.close()
+    return df
 
 
 # Inicializar base de datos al importar el módulo

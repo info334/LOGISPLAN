@@ -9,7 +9,7 @@ from datetime import datetime
 from typing import Optional, Union
 import unicodedata
 
-from database import get_reglas, get_connection
+from database import get_reglas, get_connection, get_exclusiones_banco
 
 
 def _normalizar_texto(texto: str) -> str:
@@ -226,6 +226,58 @@ def auto_categorizar(df: pd.DataFrame) -> pd.DataFrame:
             df.at[idx, 'necesita_revision'] = True
 
     return df
+
+
+def aplicar_exclusiones(df: pd.DataFrame) -> tuple:
+    """
+    Aplica reglas de exclusion bancaria.
+    Los movimientos cuya descripcion coincide con un patron de exclusion
+    se eliminan del DataFrame y se devuelven como lista aparte para log.
+
+    Retorna: (df_filtrado, lista_excluidos)
+    Donde lista_excluidos es lista de dicts con: fecha, descripcion, importe,
+    patron_exclusion, motivo, categoria_id
+    """
+    exclusiones_df = get_exclusiones_banco()
+    exclusiones_activas = exclusiones_df[exclusiones_df['activa'] == 1]
+
+    if len(exclusiones_activas) == 0:
+        return df, []
+
+    # Crear lista de reglas: (patron, categoria_id, motivo, categoria_nombre)
+    reglas_exc = []
+    for _, row in exclusiones_activas.iterrows():
+        reglas_exc.append((
+            str(row['patron']).upper(),
+            row['categoria_id'],
+            row.get('motivo', ''),
+            row.get('categoria_nombre', ''),
+        ))
+
+    excluidos = []
+    indices_excluir = []
+
+    for idx in df.index:
+        descripcion = str(df.at[idx, 'descripcion']).upper()
+
+        for patron, cat_id, motivo, cat_nombre in reglas_exc:
+            if patron in descripcion:
+                excluidos.append({
+                    'fecha': str(df.at[idx, 'fecha']),
+                    'descripcion': str(df.at[idx, 'descripcion']),
+                    'importe': float(df.at[idx, 'importe']) if pd.notna(df.at[idx, 'importe']) else 0.0,
+                    'patron_exclusion': patron,
+                    'motivo': motivo,
+                    'categoria_id': cat_id,
+                    'categoria_nombre': cat_nombre,
+                })
+                indices_excluir.append(idx)
+                break  # Solo primera coincidencia por movimiento
+
+    # Eliminar filas excluidas del DataFrame
+    df_filtrado = df.drop(indices_excluir).reset_index(drop=True)
+
+    return df_filtrado, excluidos
 
 
 def preparar_para_guardado(df: pd.DataFrame) -> list:

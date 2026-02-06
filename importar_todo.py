@@ -14,11 +14,12 @@ from io import BytesIO
 from database import (
     get_connection, insertar_movimientos, insertar_costes_laborales_batch,
     insertar_importacion_tipada, verificar_hash_duplicado, verificar_nombre_duplicado,
-    get_importaciones_por_mes, upsert_checklist_documento
+    get_importaciones_por_mes, upsert_checklist_documento,
+    insertar_movimientos_excluidos, get_movimientos_excluidos
 )
 from importador import (
     parsear_csv_abanca, auto_categorizar, detectar_duplicados,
-    validar_importacion, preparar_para_guardado
+    validar_importacion, preparar_para_guardado, aplicar_exclusiones
 )
 from importador_facturas import (
     parsear_factura_pdf, generar_movimientos_para_db, detectar_tipo_valcarce
@@ -145,10 +146,14 @@ def detectar_tipo_archivo(contenido: bytes, nombre: str) -> dict:
                 resultado['tipo'] = 'EXTRACTO_ABANCA'
                 resultado['nombre_tipo'] = 'Extracto bancario Abanca'
                 df = auto_categorizar(df)
+                df, excluidos = aplicar_exclusiones(df)
                 df = detectar_duplicados(df)
                 stats = validar_importacion(df)
-                resultado['parsed_data'] = {'df': df, 'stats': stats}
-                resultado['resumen'] = f"{stats['total_filas']} movimientos"
+                resultado['parsed_data'] = {'df': df, 'stats': stats, 'excluidos': excluidos}
+                resumen = f"{stats['total_filas']} movimientos"
+                if excluidos:
+                    resumen += f" ({len(excluidos)} excluidos)"
+                resultado['resumen'] = resumen
                 # Detectar mes por la moda de fechas
                 fechas = pd.to_datetime(df['fecha'], errors='coerce').dropna()
                 if len(fechas) > 0:
@@ -302,6 +307,41 @@ def obtener_estado_checklist_mes(mes: str) -> list:
                 item['estado'] = 'no_aplica'
 
         resultados.append(item)
+
+    # Verificacion cruzada: si hay movimientos excluidos pero el documento alternativo no esta importado
+    EXCLUSION_A_DOCUMENTO = {
+        'TGSS': 'COSTES_LABORALES',
+        'COTIZACION': 'COSTES_LABORALES',
+        'SOLRED': 'FACTURA_SOLRED',
+        'STAROIL': 'FACTURA_STAROIL',
+        'VALCARCE': 'FACTURA_VALCARCE_PEAJES',
+    }
+
+    df_excluidos = pd.read_sql_query("""
+        SELECT patron_exclusion, COUNT(*) as cnt, SUM(ABS(importe)) as total
+        FROM movimientos_excluidos
+        WHERE mes_referencia = ?
+        GROUP BY patron_exclusion
+    """, conn, params=[mes])
+
+    if len(df_excluidos) > 0:
+        # Construir mapa de estado por tipo
+        estado_por_tipo = {item['tipo']: item['estado'] for item in resultados}
+
+        for _, exc_row in df_excluidos.iterrows():
+            patron = exc_row['patron_exclusion']
+            doc_tipo = EXCLUSION_A_DOCUMENTO.get(patron)
+            if doc_tipo and estado_por_tipo.get(doc_tipo) == 'pendiente':
+                # Encontrar el item y añadir aviso
+                for item in resultados:
+                    if item['tipo'] == doc_tipo:
+                        total_exc = exc_row['total'] if exc_row['total'] else 0
+                        item['aviso'] = (
+                            f"Se excluyeron {int(exc_row['cnt'])} movimientos bancarios "
+                            f"({_formato_importe(total_exc)}) con patron '{patron}' "
+                            f"pero este documento aun no se ha importado"
+                        )
+                        break
 
     conn.close()
     return resultados
@@ -519,10 +559,14 @@ def _ejecutar_importacion(seleccionados):
                 parsed = item['parsed_data']
                 if parsed and 'df' in parsed:
                     movimientos = preparar_para_guardado(parsed['df'])
-                    insertar_movimientos(
+                    imp_id = insertar_movimientos(
                         movimientos, item['nombre'],
                         tipo=tipo, hash_archivo=item['hash'], mes_referencia=mes
                     )
+                    # Registrar movimientos excluidos
+                    excluidos_log = parsed.get('excluidos', [])
+                    if excluidos_log:
+                        insertar_movimientos_excluidos(excluidos_log, importacion_id=imp_id, mes_referencia=mes)
                     exitos += 1
                 else:
                     errores.append(f"{item['nombre']}: Sin datos parseados")
@@ -694,6 +738,10 @@ def _render_checklist_tab():
                 st.caption("Importar")
             elif estado in ('importado', 'detectado'):
                 st.caption("OK")
+
+        # Mostrar aviso de verificacion cruzada
+        if item.get('aviso'):
+            st.caption(f"\u26a0\ufe0f {item['aviso']}")
 
     # Historico
     st.markdown("---")

@@ -14,11 +14,13 @@ from database import (
     get_amortizaciones, guardar_amortizaciones, inicializar_amortizaciones_default,
     get_costes_laborales, insertar_costes_laborales_batch, get_resumen_costes_por_vehiculo,
     eliminar_movimientos, get_movimientos_con_filtros,
-    get_facturacion, insertar_facturacion, eliminar_facturacion
+    get_facturacion, insertar_facturacion, eliminar_facturacion,
+    get_exclusiones_banco, guardar_exclusion_banco, eliminar_exclusion_banco,
+    toggle_exclusion_banco, insertar_movimientos_excluidos
 )
 from importador import (
     parsear_csv_abanca, auto_categorizar, preparar_para_guardado,
-    validar_importacion, detectar_duplicados
+    validar_importacion, detectar_duplicados, aplicar_exclusiones
 )
 from importador_facturas import parsear_factura_pdf, generar_movimientos_para_db
 from importador_costes import parsear_pdf_costes_laborales, TRABAJADORES
@@ -170,11 +172,13 @@ def pagina_importar():
             with st.spinner("Procesando archivo..."):
                 df = parsear_csv_abanca(archivo.read(), archivo.name)
                 df = auto_categorizar(df)
+                df, excluidos = aplicar_exclusiones(df)
                 df = detectar_duplicados(df)
                 stats = validar_importacion(df)
 
                 st.session_state.df_importacion = df
                 st.session_state.stats_importacion = stats
+                st.session_state.excluidos_importacion = excluidos
                 st.session_state.movimientos_split = {}
                 st.rerun()
 
@@ -213,6 +217,22 @@ def pagina_importar():
         duplicados = int(df['posible_duplicado'].astype(bool).sum())
         if duplicados > 0:
             st.warning(f"⚠️ Se detectaron {duplicados} posibles duplicados")
+
+        # Resumen de exclusiones
+        excluidos = st.session_state.get('excluidos_importacion', [])
+        if excluidos:
+            total_excluido = sum(abs(e.get('importe', 0)) for e in excluidos)
+            with st.expander(f"⏭️ Movimientos saltados por exclusion: {len(excluidos)} ({formato_importe_es(total_excluido)})", expanded=True):
+                for exc in excluidos:
+                    col_e1, col_e2, col_e3, col_e4 = st.columns([2, 3, 1.5, 3])
+                    with col_e1:
+                        st.caption(exc.get('fecha', '-'))
+                    with col_e2:
+                        st.caption(exc.get('descripcion', '-')[:50])
+                    with col_e3:
+                        st.caption(formato_importe_es(exc.get('importe', 0)))
+                    with col_e4:
+                        st.caption(f"Regla: {exc.get('patron_exclusion', '')} | {exc.get('motivo', '')}")
 
         st.markdown("---")
 
@@ -460,11 +480,30 @@ def pagina_importar():
                     st.error(f"Hay {len(gastos_sin_vehiculo)} gastos sin vehículo asignado.")
                 else:
                     importacion_id = insertar_movimientos(movimientos_finales, archivo.name if archivo else "manual")
-                    st.success(f"✅ Importación #{importacion_id} guardada. {len(movimientos_finales)} movimientos.")
+
+                    # Registrar movimientos excluidos en log
+                    excluidos_log = st.session_state.get('excluidos_importacion', [])
+                    if excluidos_log:
+                        # Detectar mes de referencia
+                        fechas = [m['fecha'] for m in movimientos_finales if m.get('fecha')]
+                        mes_ref = None
+                        if fechas:
+                            import pandas as _pd
+                            fechas_dt = _pd.to_datetime(fechas, errors='coerce').dropna()
+                            if len(fechas_dt) > 0:
+                                mes_ref = fechas_dt.to_period('M').mode()[0].strftime('%Y-%m')
+                        insertar_movimientos_excluidos(excluidos_log, importacion_id=importacion_id, mes_referencia=mes_ref)
+
+                    n_excluidos = len(excluidos_log)
+                    msg = f"✅ Importacion #{importacion_id} guardada. {len(movimientos_finales)} movimientos."
+                    if n_excluidos > 0:
+                        msg += f" {n_excluidos} saltados por exclusion."
+                    st.success(msg)
 
                     # Limpiar estado
                     st.session_state.df_importacion = None
                     st.session_state.stats_importacion = None
+                    st.session_state.excluidos_importacion = []
                     st.session_state.movimientos_split = {}
                     st.rerun()
 
@@ -472,6 +511,7 @@ def pagina_importar():
             if st.button("🗑️ Cancelar", use_container_width=True):
                 st.session_state.df_importacion = None
                 st.session_state.stats_importacion = None
+                st.session_state.excluidos_importacion = []
                 st.session_state.movimientos_split = {}
                 st.rerun()
 
@@ -1148,6 +1188,63 @@ def pagina_config():
         if st.button("🔄 Recargar", use_container_width=True):
             st.session_state.reload_amort = True
             st.rerun()
+
+    # ---- Sección: Exclusiones bancarias ----
+    st.markdown("---")
+    st.markdown("### ⏭️ Reglas de exclusion bancaria")
+    st.caption("Los movimientos bancarios que coincidan con estos patrones se saltaran al importar el extracto CSV, "
+               "porque se importan con mas detalle desde otra fuente (facturas PDF, archivo SS).")
+
+    exclusiones_df = get_exclusiones_banco()
+    categorias_df = get_categorias()
+    cat_opciones = categorias_df['id'].tolist() if len(categorias_df) > 0 else []
+
+    if len(exclusiones_df) > 0:
+        for _, exc in exclusiones_df.iterrows():
+            col_pat, col_cat, col_mot, col_act, col_del = st.columns([2, 1.5, 3, 1, 1])
+
+            with col_pat:
+                st.text(exc['patron'])
+            with col_cat:
+                cat_nombre = exc.get('categoria_nombre') or exc['categoria_id']
+                st.text(cat_nombre)
+            with col_mot:
+                st.caption(exc.get('motivo') or '-')
+            with col_act:
+                nueva_activa = st.checkbox(
+                    "Activa", value=bool(exc['activa']),
+                    key=f"exc_activa_{exc['id']}", label_visibility="collapsed"
+                )
+                if nueva_activa != bool(exc['activa']):
+                    toggle_exclusion_banco(exc['id'], nueva_activa)
+                    st.rerun()
+            with col_del:
+                if st.button("🗑️", key=f"exc_del_{exc['id']}", help="Eliminar regla"):
+                    eliminar_exclusion_banco(exc['id'])
+                    st.rerun()
+    else:
+        st.info("No hay reglas de exclusion configuradas.")
+
+    # Formulario para añadir nueva regla
+    st.markdown("#### Añadir nueva regla")
+    col_np, col_nc, col_nm, col_nb = st.columns([2, 1.5, 3, 1])
+    with col_np:
+        nuevo_patron = st.text_input("Patron (palabra clave)", key="exc_nuevo_patron",
+                                     placeholder="Ej: TGSS")
+    with col_nc:
+        nueva_cat = st.selectbox("Categoria", cat_opciones, key="exc_nueva_cat")
+    with col_nm:
+        nuevo_motivo = st.text_input("Motivo", key="exc_nuevo_motivo",
+                                     placeholder="Ej: Se importa desde factura X")
+    with col_nb:
+        st.markdown("<br>", unsafe_allow_html=True)
+        if st.button("➕ Añadir", key="exc_btn_add"):
+            if nuevo_patron and nuevo_patron.strip():
+                guardar_exclusion_banco(nuevo_patron, nueva_cat, nuevo_motivo)
+                st.success(f"Regla '{nuevo_patron.strip().upper()}' añadida")
+                st.rerun()
+            else:
+                st.error("El patron no puede estar vacio")
 
 
 # ============== PÁGINA: REGISTROS ==============
