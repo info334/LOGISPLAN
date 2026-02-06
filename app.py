@@ -16,7 +16,8 @@ from database import (
     eliminar_movimientos, get_movimientos_con_filtros,
     get_facturacion, insertar_facturacion, eliminar_facturacion,
     get_exclusiones_banco, guardar_exclusion_banco, eliminar_exclusion_banco,
-    toggle_exclusion_banco, insertar_movimientos_excluidos
+    toggle_exclusion_banco, insertar_movimientos_excluidos,
+    get_km_totales_vehiculo
 )
 from importador import (
     parsear_csv_abanca, auto_categorizar, preparar_para_guardado,
@@ -916,7 +917,15 @@ def mostrar_tab_vehiculo(vehiculo_id: str, vehiculo_desc: str):
     total_gastos = df_pnl['gastos'].sum()
     total_neto = df_pnl['neto'].sum()
 
-    col_m1, col_m2, col_m3 = st.columns(3)
+    # Datos de kilómetros (hojas de ruta)
+    df_km = get_km_totales_vehiculo(vehiculo_id)
+    total_km = float(df_km['km'].sum()) if len(df_km) > 0 else 0
+
+    if total_km > 0:
+        col_m1, col_m2, col_m3, col_m4, col_m5 = st.columns(5)
+    else:
+        col_m1, col_m2, col_m3 = st.columns(3)
+
     with col_m1:
         st.metric("Total Ingresos", formato_importe_es(total_ingresos))
     with col_m2:
@@ -926,6 +935,15 @@ def mostrar_tab_vehiculo(vehiculo_id: str, vehiculo_desc: str):
         st.metric("Resultado Neto", formato_importe_es(total_neto),
                  delta=f"{(total_neto/total_ingresos*100):.1f}% margen" if total_ingresos > 0 else None,
                  delta_color=delta_color)
+
+    if total_km > 0:
+        coste_km = abs(total_gastos) / total_km if total_km > 0 else 0
+        total_viajes = int(df_km['viajes'].sum()) if 'viajes' in df_km.columns else 0
+        with col_m4:
+            st.metric("Total Km", f"{total_km:,.1f} km",
+                     delta=f"{total_viajes} viajes" if total_viajes > 0 else None)
+        with col_m5:
+            st.metric("Coste/Km", f"{coste_km:,.3f} €/km")
 
     st.markdown("---")
 
@@ -944,8 +962,19 @@ def mostrar_tab_vehiculo(vehiculo_id: str, vehiculo_desc: str):
     df_tabla['Gastos'] = df_tabla['gastos'].apply(lambda x: formato_importe_es(abs(x)))
     df_tabla['Neto'] = df_tabla['neto'].apply(formato_importe_es)
 
+    columnas = ['Mes', 'Ingresos', 'Gastos', 'Neto']
+
+    # Añadir columnas de km si hay datos de hojas de ruta
+    if total_km > 0 and len(df_km) > 0:
+        km_por_mes = df_km.set_index('mes')['km'].to_dict()
+        viajes_por_mes = df_km.set_index('mes')['viajes'].to_dict()
+        df_tabla['Km'] = df_tabla['mes'].map(lambda m: f"{km_por_mes.get(m, 0):,.1f}" if km_por_mes.get(m, 0) > 0 else "-")
+        df_tabla['Viajes'] = df_tabla['mes'].map(lambda m: str(viajes_por_mes.get(m, 0)) if viajes_por_mes.get(m, 0) > 0 else "-")
+        df_tabla['€/Km'] = df_tabla['mes'].map(lambda m: f"{abs(df_pnl[df_pnl['mes']==m]['gastos'].sum()) / km_por_mes[m]:,.3f}" if km_por_mes.get(m, 0) > 0 else "-")
+        columnas += ['Km', 'Viajes', '€/Km']
+
     st.dataframe(
-        df_tabla[['Mes', 'Ingresos', 'Gastos', 'Neto']],
+        df_tabla[columnas],
         use_container_width=True,
         hide_index=True
     )

@@ -187,6 +187,24 @@ def init_database():
         )
     """)
 
+    # Tabla de hojas de ruta (kilómetros por vehículo/zona)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS hojas_ruta (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            mes TEXT NOT NULL,
+            vehiculo_id TEXT NOT NULL,
+            zona TEXT NOT NULL,
+            viajes INTEGER DEFAULT 0,
+            repartos INTEGER DEFAULT 0,
+            km REAL DEFAULT 0,
+            media_repartos_viaje REAL,
+            dias_trabajados INTEGER,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (vehiculo_id) REFERENCES vehiculos(id),
+            UNIQUE(mes, vehiculo_id, zona)
+        )
+    """)
+
     # Índices para mejorar rendimiento
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_movimientos_fecha ON movimientos(fecha)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_movimientos_vehiculo ON movimientos(vehiculo_id)")
@@ -194,6 +212,7 @@ def init_database():
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_costes_laborales_mes ON costes_laborales(mes)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_costes_laborales_vehiculo ON costes_laborales(vehiculo_id)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_importaciones_mes_tipo ON importaciones(mes_referencia, tipo)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_hojas_ruta_mes ON hojas_ruta(mes, vehiculo_id)")
 
     conn.commit()
 
@@ -1053,6 +1072,99 @@ def get_movimientos_excluidos(mes_referencia=None) -> pd.DataFrame:
             SELECT * FROM movimientos_excluidos
             ORDER BY created_at DESC
         """, conn)
+    conn.close()
+    return df
+
+
+# ============== FUNCIONES PARA HOJAS DE RUTA ==============
+
+def insertar_hoja_ruta(datos: dict) -> int:
+    """
+    Inserta datos de una hoja de ruta (zonas + totales).
+    datos = {'mes', 'vehiculo_id', 'zonas': [...], 'total_viajes', 'total_km', ...}
+    """
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    mes = datos['mes']
+    vehiculo_id = datos['vehiculo_id']
+    media = datos.get('media_repartos_viaje', 0)
+    dias = datos.get('dias_trabajados', 0)
+
+    # Insertar cada zona
+    for zona in datos.get('zonas', []):
+        cursor.execute("""
+            INSERT OR REPLACE INTO hojas_ruta
+            (mes, vehiculo_id, zona, viajes, repartos, km, media_repartos_viaje, dias_trabajados)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            mes, vehiculo_id, zona['zona'],
+            zona.get('viajes', 0),
+            zona.get('repartos', 0),
+            zona.get('km', 0),
+            media, dias
+        ))
+
+    # Insertar fila TOTAL con los totales generales
+    cursor.execute("""
+        INSERT OR REPLACE INTO hojas_ruta
+        (mes, vehiculo_id, zona, viajes, repartos, km, media_repartos_viaje, dias_trabajados)
+        VALUES (?, ?, 'TOTAL', ?, ?, ?, ?, ?)
+    """, (
+        mes, vehiculo_id,
+        datos.get('total_viajes', 0),
+        datos.get('total_repartos', 0),
+        datos.get('total_km', 0),
+        media, dias
+    ))
+
+    conn.commit()
+    num = cursor.lastrowid
+    conn.close()
+    return num
+
+
+def get_hojas_ruta(mes=None, vehiculo_id=None) -> pd.DataFrame:
+    """Obtiene hojas de ruta con filtros opcionales."""
+    conn = get_connection()
+    query = "SELECT * FROM hojas_ruta WHERE 1=1"
+    params = []
+
+    if mes:
+        query += " AND mes = ?"
+        params.append(mes)
+    if vehiculo_id:
+        query += " AND vehiculo_id = ?"
+        params.append(vehiculo_id)
+
+    query += " ORDER BY mes DESC, vehiculo_id, zona"
+    df = pd.read_sql_query(query, conn, params=params)
+    conn.close()
+    return df
+
+
+def get_km_por_vehiculo_mes(vehiculo_id: str, mes: str) -> float:
+    """Obtiene el total de km de un vehículo en un mes."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT km FROM hojas_ruta
+        WHERE vehiculo_id = ? AND mes = ? AND zona = 'TOTAL'
+    """, (vehiculo_id, mes))
+    row = cursor.fetchone()
+    conn.close()
+    return float(row['km']) if row else 0.0
+
+
+def get_km_totales_vehiculo(vehiculo_id: str) -> pd.DataFrame:
+    """Obtiene km mensuales de un vehículo (solo filas TOTAL)."""
+    conn = get_connection()
+    df = pd.read_sql_query("""
+        SELECT mes, km, viajes, repartos, dias_trabajados, media_repartos_viaje
+        FROM hojas_ruta
+        WHERE vehiculo_id = ? AND zona = 'TOTAL'
+        ORDER BY mes
+    """, conn, params=[vehiculo_id])
     conn.close()
     return df
 

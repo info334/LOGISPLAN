@@ -15,7 +15,8 @@ from database import (
     get_connection, insertar_movimientos, insertar_costes_laborales_batch,
     insertar_importacion_tipada, verificar_hash_duplicado, verificar_nombre_duplicado,
     get_importaciones_por_mes, upsert_checklist_documento,
-    insertar_movimientos_excluidos, get_movimientos_excluidos
+    insertar_movimientos_excluidos, get_movimientos_excluidos,
+    insertar_hoja_ruta, get_hojas_ruta
 )
 from importador import (
     parsear_csv_abanca, auto_categorizar, detectar_duplicados,
@@ -25,6 +26,7 @@ from importador_facturas import (
     parsear_factura_pdf, generar_movimientos_para_db, detectar_tipo_valcarce
 )
 from importador_costes import parsear_pdf_costes_laborales
+from importador_hojas_ruta import parsear_pdf_hoja_ruta
 
 
 # ============== CONSTANTES ==============
@@ -102,6 +104,13 @@ TIPOS_DOCUMENTO = {
         'obligatorio': False,
         'fuente': 'movimientos_cat',
         'categoria_id': 'LEAS',
+    },
+    'HOJA_RUTA': {
+        'nombre': 'Hoja de ruta',
+        'icono': '\U0001f5fa\ufe0f',
+        'frecuencia': 'Mensual',
+        'obligatorio': True,
+        'fuente': 'hojas_ruta',
     },
 }
 
@@ -187,16 +196,40 @@ def detectar_tipo_archivo(contenido: bytes, nombre: str) -> dict:
                     resultado['error'] = f'Error al parsear costes: {e}'
                 return resultado
 
-        # Facturas PDF: detectar proveedor por contenido
+        # Leer texto del PDF para detectar tipo
         try:
             pdf = pdfplumber.open(BytesIO(contenido))
             texto = ''
             for page in pdf.pages:
                 texto += (page.extract_text() or '')
             pdf.close()
+        except Exception as e:
+            resultado['error'] = f'Error al leer PDF: {e}'
+            return resultado
 
-            texto_upper = texto.upper()
+        texto_upper = texto.upper()
 
+        # Hoja de ruta (detectar por contenido: "Dispositivo" + zonas de reparto)
+        if 'DISPOSITIVO' in texto_upper and ('VERDE' in texto_upper or 'VIAJES' in texto_upper):
+            try:
+                datos_hr, errores_hr = parsear_pdf_hoja_ruta(contenido, nombre)
+                resultado['tipo'] = 'HOJA_RUTA'
+                resultado['nombre_tipo'] = 'Hoja de ruta'
+                if errores_hr:
+                    resultado['error'] = '; '.join(errores_hr)
+                else:
+                    resultado['parsed_data'] = datos_hr
+                    resultado['mes_detectado'] = datos_hr.get('mes')
+                    veh = datos_hr.get('vehiculo_id', '?')
+                    km = datos_hr.get('total_km', 0)
+                    viajes = datos_hr.get('total_viajes', 0)
+                    resultado['resumen'] = f"{veh}: {km:.1f} km, {viajes} viajes"
+            except Exception as e:
+                resultado['error'] = f'Error al parsear hoja de ruta: {e}'
+            return resultado
+
+        # Facturas PDF: detectar proveedor por contenido
+        try:
             if 'STAROIL' in texto_upper:
                 resultado['tipo'] = 'FACTURA_STAROIL'
                 resultado['nombre_tipo'] = 'Factura Staroil'
@@ -277,6 +310,19 @@ def obtener_estado_checklist_mes(mes: str) -> list:
             if len(df) > 0 and df.iloc[0]['cnt'] > 0:
                 item['estado'] = 'importado'
                 item['importe'] = float(df.iloc[0]['total']) if df.iloc[0]['total'] else 0
+
+        elif fuente == 'hojas_ruta':
+            df = pd.read_sql_query("""
+                SELECT COUNT(DISTINCT vehiculo_id) as cnt, SUM(km) as total_km
+                FROM hojas_ruta
+                WHERE mes = ? AND zona != 'TOTAL'
+            """, conn, params=[mes])
+            if len(df) > 0 and df.iloc[0]['cnt'] > 0:
+                item['estado'] = 'importado'
+                n_vehs = int(df.iloc[0]['cnt'])
+                total_km = float(df.iloc[0]['total_km']) if df.iloc[0]['total_km'] else 0
+                item['importe'] = total_km  # Usamos importe para mostrar km
+                item['notas'] = f"{n_vehs} vehiculos, {total_km:,.1f} km"
 
         elif fuente == 'movimientos_cat':
             cat_id = tipo_info.get('categoria_id')
@@ -601,6 +647,21 @@ def _ejecutar_importacion(seleccionados):
                     exitos += 1
                 else:
                     errores.append(f"{item['nombre']}: Sin datos de costes validos")
+
+            elif tipo == 'HOJA_RUTA':
+                parsed = item['parsed_data']
+                if parsed and parsed.get('zonas'):
+                    insertar_hoja_ruta(parsed)
+                    num_zonas = len(parsed.get('zonas', []))
+                    insertar_importacion_tipada(
+                        item['nombre'], num_zonas,
+                        mes + '-01' if mes else None,
+                        mes + '-28' if mes else None,
+                        tipo, item['hash'], mes
+                    )
+                    exitos += 1
+                else:
+                    errores.append(f"{item['nombre']}: Sin datos de hoja de ruta validos")
 
             else:
                 errores.append(f"{item['nombre']}: Tipo '{tipo}' no soportado para importacion")
