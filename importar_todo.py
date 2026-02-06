@@ -15,8 +15,7 @@ from database import (
     get_connection, insertar_movimientos, insertar_costes_laborales_batch,
     insertar_importacion_tipada, verificar_hash_duplicado, verificar_nombre_duplicado,
     get_importaciones_por_mes, upsert_checklist_documento,
-    insertar_movimientos_excluidos, get_movimientos_excluidos,
-    insertar_hoja_ruta, get_hojas_ruta
+    insertar_movimientos_excluidos, get_movimientos_excluidos
 )
 from importador import (
     parsear_csv_abanca, auto_categorizar, detectar_duplicados,
@@ -26,7 +25,6 @@ from importador_facturas import (
     parsear_factura_pdf, generar_movimientos_para_db, detectar_tipo_valcarce
 )
 from importador_costes import parsear_pdf_costes_laborales
-from importador_hojas_ruta import parsear_pdf_hoja_ruta
 
 
 # ============== CONSTANTES ==============
@@ -212,6 +210,7 @@ def detectar_tipo_archivo(contenido: bytes, nombre: str) -> dict:
         # Hoja de ruta (detectar por contenido: "Dispositivo" + zonas de reparto)
         if 'DISPOSITIVO' in texto_upper and ('VERDE' in texto_upper or 'VIAJES' in texto_upper):
             try:
+                from importador_hojas_ruta import parsear_pdf_hoja_ruta
                 datos_hr, errores_hr = parsear_pdf_hoja_ruta(contenido, nombre)
                 resultado['tipo'] = 'HOJA_RUTA'
                 resultado['nombre_tipo'] = 'Hoja de ruta'
@@ -651,6 +650,7 @@ def _ejecutar_importacion(seleccionados):
             elif tipo == 'HOJA_RUTA':
                 parsed = item['parsed_data']
                 if parsed and parsed.get('zonas'):
+                    from database import insertar_hoja_ruta
                     insertar_hoja_ruta(parsed)
                     num_zonas = len(parsed.get('zonas', []))
                     insertar_importacion_tipada(

@@ -8,30 +8,23 @@ import pandas as pd
 from datetime import datetime
 
 # Importar módulos propios
-try:
-    from database import (
-        init_database, get_vehiculos, get_categorias, get_movimientos,
-        insertar_movimientos, get_vehiculos_operativos,
-        get_amortizaciones, guardar_amortizaciones, inicializar_amortizaciones_default,
-        get_costes_laborales, insertar_costes_laborales_batch, get_resumen_costes_por_vehiculo,
-        eliminar_movimientos, get_movimientos_con_filtros,
-        get_facturacion, insertar_facturacion, eliminar_facturacion,
-        get_exclusiones_banco, guardar_exclusion_banco, eliminar_exclusion_banco,
-        toggle_exclusion_banco, insertar_movimientos_excluidos,
-        get_km_totales_vehiculo
-    )
-    from importador import (
-        parsear_csv_abanca, auto_categorizar, preparar_para_guardado,
-        validar_importacion, detectar_duplicados, aplicar_exclusiones
-    )
-    from importador_facturas import parsear_factura_pdf, generar_movimientos_para_db
-    from importador_costes import parsear_pdf_costes_laborales, TRABAJADORES
-    from importar_todo import pagina_importar_todo, obtener_estado_checklist_mes
-except ImportError as e:
-    import traceback
-    st.error(f"Error de importación: {e}")
-    st.code(traceback.format_exc())
-    st.stop()
+from database import (
+    init_database, get_vehiculos, get_categorias, get_movimientos,
+    insertar_movimientos, get_vehiculos_operativos,
+    get_amortizaciones, guardar_amortizaciones, inicializar_amortizaciones_default,
+    get_costes_laborales, insertar_costes_laborales_batch, get_resumen_costes_por_vehiculo,
+    eliminar_movimientos, get_movimientos_con_filtros,
+    get_facturacion, insertar_facturacion, eliminar_facturacion,
+    get_exclusiones_banco, guardar_exclusion_banco, eliminar_exclusion_banco,
+    toggle_exclusion_banco, insertar_movimientos_excluidos
+)
+from importador import (
+    parsear_csv_abanca, auto_categorizar, preparar_para_guardado,
+    validar_importacion, detectar_duplicados, aplicar_exclusiones
+)
+from importador_facturas import parsear_factura_pdf, generar_movimientos_para_db
+from importador_costes import parsear_pdf_costes_laborales, TRABAJADORES
+from importar_todo import pagina_importar_todo, obtener_estado_checklist_mes
 
 # Para parseo de PDF de costes laborales
 import pdfplumber
@@ -924,6 +917,7 @@ def mostrar_tab_vehiculo(vehiculo_id: str, vehiculo_desc: str):
     total_neto = df_pnl['neto'].sum()
 
     # Datos de kilómetros (hojas de ruta)
+    from database import get_km_totales_vehiculo
     df_km = get_km_totales_vehiculo(vehiculo_id)
     total_km = float(df_km['km'].sum()) if len(df_km) > 0 else 0
 
