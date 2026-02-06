@@ -525,10 +525,15 @@ def pagina_importar():
                         fechas = [m['fecha'] for m in movimientos_finales if m.get('fecha')]
                         mes_ref = None
                         if fechas:
-                            import pandas as _pd
-                            fechas_dt = _pd.to_datetime(fechas, errors='coerce').dropna()
-                            if len(fechas_dt) > 0:
-                                mes_ref = fechas_dt.to_period('M').mode()[0].strftime('%Y-%m')
+                            try:
+                                import pandas as _pd
+                                fechas_dt = _pd.to_datetime(fechas, errors='coerce').dropna()
+                                if len(fechas_dt) > 0:
+                                    # Extraer año-mes del mes más frecuente
+                                    meses = fechas_dt.strftime('%Y-%m')
+                                    mes_ref = meses.mode()[0] if len(meses.mode()) > 0 else fechas_dt[0].strftime('%Y-%m')
+                            except Exception:
+                                pass
                         insertar_movimientos_excluidos(todos_excluidos, importacion_id=importacion_id, mes_referencia=mes_ref)
 
                     n_auto = len(excluidos_log)
