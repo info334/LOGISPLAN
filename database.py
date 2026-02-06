@@ -268,7 +268,10 @@ def _insertar_datos_iniciales(conn: sqlite3.Connection):
         ("TRANSOLVER", "FIN", None),
         # Impuestos
         ("IMP:", "IMP", "COMÚN"),
+        ("IMP ", "IMP", "COMÚN"),
+        ("IMPUESTO", "IMP", "COMÚN"),
         ("NRC:", "IMP", "COMÚN"),
+        ("AEAT", "IMP", "COMÚN"),
         # Telecomunicaciones
         ("TELEFONICA", "TEL", "COMÚN"),
         ("VODAFONE", "TEL", "COMÚN"),

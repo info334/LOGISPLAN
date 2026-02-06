@@ -159,6 +159,8 @@ def pagina_importar():
         st.session_state.stats_importacion = None
     if 'movimientos_split' not in st.session_state:
         st.session_state.movimientos_split = {}  # {idx: [{vehiculo, importe}, ...]}
+    if 'movimientos_skip' not in st.session_state:
+        st.session_state.movimientos_skip = set()  # Indices de movimientos saltados manualmente
 
     # File uploader
     archivo = st.file_uploader(
@@ -270,11 +272,26 @@ def pagina_importar():
                 else:
                     estado = "✅"
 
+                es_skip = idx in st.session_state.movimientos_skip
+
                 with st.container():
-                    col_estado, col_fecha, col_desc, col_importe, col_cat, col_veh = st.columns([0.5, 1, 4, 1.5, 1.5, 1.5])
+                    col_skip, col_estado, col_fecha, col_desc, col_importe, col_cat, col_veh = st.columns([0.4, 0.4, 1, 3.5, 1.5, 1.5, 1.5])
+
+                    with col_skip:
+                        skip_val = st.checkbox(
+                            "Skip", value=es_skip,
+                            key=f"skip_{idx}", label_visibility="collapsed"
+                        )
+                        if skip_val and idx not in st.session_state.movimientos_skip:
+                            st.session_state.movimientos_skip.add(idx)
+                        elif not skip_val and idx in st.session_state.movimientos_skip:
+                            st.session_state.movimientos_skip.discard(idx)
 
                     with col_estado:
-                        st.write(estado)
+                        if es_skip:
+                            st.write("\u23ed\ufe0f")
+                        else:
+                            st.write(estado)
 
                     with col_fecha:
                         st.write(row['fecha'])
@@ -283,14 +300,19 @@ def pagina_importar():
                         desc_text = str(row['descripcion'])[:60]
                         if len(str(row['descripcion'])) > 60:
                             desc_text += "..."
-                        st.write(desc_text)
+                        if es_skip:
+                            st.markdown(f"~~{desc_text}~~")
+                        else:
+                            st.write(desc_text)
 
                     with col_importe:
-                        color = "red" if es_gasto else "green"
+                        color = "gray" if es_skip else ("red" if es_gasto else "green")
                         st.markdown(f"<span style='color:{color}'>{formato_importe_es(importe)}</span>", unsafe_allow_html=True)
 
                     with col_cat:
-                        if not esta_dividido:
+                        if es_skip:
+                            st.caption("skip")
+                        elif not esta_dividido:
                             cat_actual = row['categoria_id'] if row['categoria_id'] else ''
                             cat_idx = categoria_options.index(cat_actual) if cat_actual in categoria_options else 0
                             nueva_cat = st.selectbox(
@@ -305,7 +327,9 @@ def pagina_importar():
                             st.write("(dividido)")
 
                     with col_veh:
-                        if not esta_dividido:
+                        if es_skip:
+                            st.caption("")
+                        elif not esta_dividido:
                             veh_actual = row['vehiculo_id'] if row['vehiculo_id'] else ''
                             veh_idx = vehiculo_options.index(veh_actual) if veh_actual in vehiculo_options else 0
                             nuevo_veh = st.selectbox(
@@ -441,11 +465,23 @@ def pagina_importar():
 
         with col_btn1:
             if st.button("💾 Guardar Importación", type="primary", use_container_width=True):
-                # Preparar movimientos finales
+                # Preparar movimientos finales (excluir skips manuales)
                 movimientos_finales = []
+                skips_manuales = []
 
                 for idx in df.index:
                     row = df.loc[idx]
+
+                    # Si esta marcado como skip manual, no importar
+                    if idx in st.session_state.movimientos_skip:
+                        skips_manuales.append({
+                            'fecha': str(row['fecha']),
+                            'descripcion': str(row['descripcion']),
+                            'importe': float(row['importe']),
+                            'patron_exclusion': 'MANUAL',
+                            'motivo': 'Saltado manualmente por el usuario',
+                        })
+                        continue
 
                     # Verificar si está dividido
                     if idx in st.session_state.movimientos_split and st.session_state.movimientos_split[idx]:
@@ -481,9 +517,10 @@ def pagina_importar():
                 else:
                     importacion_id = insertar_movimientos(movimientos_finales, archivo.name if archivo else "manual")
 
-                    # Registrar movimientos excluidos en log
+                    # Registrar movimientos excluidos en log (auto-exclusiones + skips manuales)
                     excluidos_log = st.session_state.get('excluidos_importacion', [])
-                    if excluidos_log:
+                    todos_excluidos = list(excluidos_log) + skips_manuales
+                    if todos_excluidos:
                         # Detectar mes de referencia
                         fechas = [m['fecha'] for m in movimientos_finales if m.get('fecha')]
                         mes_ref = None
@@ -492,12 +529,19 @@ def pagina_importar():
                             fechas_dt = _pd.to_datetime(fechas, errors='coerce').dropna()
                             if len(fechas_dt) > 0:
                                 mes_ref = fechas_dt.to_period('M').mode()[0].strftime('%Y-%m')
-                        insertar_movimientos_excluidos(excluidos_log, importacion_id=importacion_id, mes_referencia=mes_ref)
+                        insertar_movimientos_excluidos(todos_excluidos, importacion_id=importacion_id, mes_referencia=mes_ref)
 
-                    n_excluidos = len(excluidos_log)
+                    n_auto = len(excluidos_log)
+                    n_manual = len(skips_manuales)
+                    n_total_excluidos = n_auto + n_manual
                     msg = f"✅ Importacion #{importacion_id} guardada. {len(movimientos_finales)} movimientos."
-                    if n_excluidos > 0:
-                        msg += f" {n_excluidos} saltados por exclusion."
+                    if n_total_excluidos > 0:
+                        partes = []
+                        if n_auto > 0:
+                            partes.append(f"{n_auto} por regla")
+                        if n_manual > 0:
+                            partes.append(f"{n_manual} manuales")
+                        msg += f" {n_total_excluidos} saltados ({', '.join(partes)})."
                     st.success(msg)
 
                     # Limpiar estado
@@ -505,6 +549,7 @@ def pagina_importar():
                     st.session_state.stats_importacion = None
                     st.session_state.excluidos_importacion = []
                     st.session_state.movimientos_split = {}
+                    st.session_state.movimientos_skip = set()
                     st.rerun()
 
         with col_btn2:
@@ -513,6 +558,7 @@ def pagina_importar():
                 st.session_state.stats_importacion = None
                 st.session_state.excluidos_importacion = []
                 st.session_state.movimientos_split = {}
+                st.session_state.movimientos_skip = set()
                 st.rerun()
 
         # Info categorías
