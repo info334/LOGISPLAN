@@ -1,6 +1,6 @@
 """
 LogisPLAN - Dashboard Gestión Flota Severino Logística
-Aplicación principal Streamlit
+Aplicación principal Streamlit v2.5
 """
 
 import streamlit as st
