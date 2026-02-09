@@ -1366,3 +1366,4 @@ def get_km_totales_vehiculo(vehiculo_id: str) -> pd.DataFrame:
 if __name__ == "__main__":
     init_database()
     print(f"Base de datos inicializada en: {DB_PATH}")
+
