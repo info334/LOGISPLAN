@@ -144,7 +144,7 @@ def init_database():
     ]:
         try:
             cursor.execute(col_sql)
-        except sqlite3.OperationalError:
+        except Exception:
             pass  # La columna ya existe
 
     # Tabla de checklist de documentos mensuales
