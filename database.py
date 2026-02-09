@@ -1,24 +1,73 @@
 """
 LogisPLAN - Módulo de Base de Datos
 Gestión de tablas SQLite para flota de transporte Severino Logística
+Soporta Turso (libsql) en producción y SQLite local en desarrollo.
 """
 
+import os
 import sqlite3
 from pathlib import Path
 from datetime import datetime
-from typing import Optional
+from typing import Optional, Union
 import pandas as pd
 
-# Ruta de la base de datos
+# Intentar importar libsql para Turso (producción)
+try:
+    import libsql_experimental as libsql
+    HAS_LIBSQL = True
+except ImportError:
+    HAS_LIBSQL = False
+
+# Ruta de la base de datos local (réplica o desarrollo)
 DB_PATH = Path(__file__).parent / "data" / "logisplan.db"
 
+# Credenciales Turso (desde secrets de Streamlit o env vars)
+TURSO_URL = None
+TURSO_TOKEN = None
 
-def get_connection() -> sqlite3.Connection:
-    """Obtiene conexión a la base de datos SQLite."""
+try:
+    import streamlit as st
+    TURSO_URL = st.secrets.get("TURSO_DATABASE_URL")
+    TURSO_TOKEN = st.secrets.get("TURSO_AUTH_TOKEN")
+except Exception:
+    pass
+
+if not TURSO_URL:
+    TURSO_URL = os.environ.get("TURSO_DATABASE_URL")
+    TURSO_TOKEN = os.environ.get("TURSO_AUTH_TOKEN")
+
+
+def get_connection() -> Union[sqlite3.Connection, "libsql.Connection"]:
+    """
+    Obtiene conexión a la base de datos.
+
+    Modo producción (Turso): Si hay credenciales Turso + libsql disponible,
+    usa conexión remota con réplica local para velocidad.
+
+    Modo desarrollo: SQLite local estándar.
+    """
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(DB_PATH), check_same_thread=False)
-    conn.row_factory = sqlite3.Row
-    return conn
+
+    if HAS_LIBSQL and TURSO_URL and TURSO_TOKEN:
+        # Modo producción: Turso con embedded replica
+        conn = libsql.connect(
+            str(DB_PATH),           # Réplica local para velocidad
+            sync_url=TURSO_URL,     # Sync con Turso remoto
+            auth_token=TURSO_TOKEN
+        )
+        conn.sync()  # Sincronizar con el servidor al conectar
+        return conn
+    else:
+        # Modo desarrollo: SQLite local
+        conn = sqlite3.connect(str(DB_PATH), check_same_thread=False)
+        conn.row_factory = sqlite3.Row
+        return conn
+
+
+def _sync_if_turso(conn):
+    """Sincroniza con Turso si estamos en modo remoto."""
+    if hasattr(conn, 'sync'):
+        conn.sync()
 
 
 def init_database():
@@ -214,7 +263,7 @@ def init_database():
             CREATE UNIQUE INDEX IF NOT EXISTS idx_movimientos_unique
             ON movimientos(fecha, descripcion, importe)
         """)
-    except sqlite3.IntegrityError:
+    except (sqlite3.IntegrityError, Exception):
         # Hay duplicados existentes, no se puede crear el índice aún.
         # No borrar datos automáticamente para evitar pérdida de información.
         pass
@@ -229,14 +278,16 @@ def init_database():
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_hojas_ruta_mes ON hojas_ruta(mes, vehiculo_id)")
 
     conn.commit()
+    _sync_if_turso(conn)
 
     # Insertar datos iniciales
     _insertar_datos_iniciales(conn)
 
+    _sync_if_turso(conn)
     conn.close()
 
 
-def _insertar_datos_iniciales(conn: sqlite3.Connection):
+def _insertar_datos_iniciales(conn):
     """Inserta vehículos, categorías y reglas iniciales."""
     cursor = conn.cursor()
 
@@ -526,6 +577,7 @@ def insertar_movimientos(movimientos: list[dict], archivo_nombre: str = None,
             duplicados += 1
 
     conn.commit()
+    _sync_if_turso(conn)
     conn.close()
 
     return {'importacion_id': importacion_id, 'insertados': insertados, 'duplicados': duplicados}
@@ -554,10 +606,11 @@ def limpiar_duplicados_existentes() -> int:
             CREATE UNIQUE INDEX IF NOT EXISTS idx_movimientos_unique
             ON movimientos(fecha, descripcion, importe)
         """)
-    except sqlite3.IntegrityError:
+    except (sqlite3.IntegrityError, Exception):
         pass  # Todavía hay conflictos, no pasa nada
 
     conn.commit()
+    _sync_if_turso(conn)
     conn.close()
     return eliminados
 
@@ -572,6 +625,7 @@ def actualizar_movimiento(id: int, categoria_id: str, vehiculo_id: str):
         WHERE id = ?
     """, (categoria_id, vehiculo_id, id))
     conn.commit()
+    _sync_if_turso(conn)
     conn.close()
 
 
@@ -582,6 +636,7 @@ def eliminar_importacion(importacion_id: int):
     cursor.execute("DELETE FROM movimientos WHERE importacion_id = ?", (importacion_id,))
     cursor.execute("DELETE FROM importaciones WHERE id = ?", (importacion_id,))
     conn.commit()
+    _sync_if_turso(conn)
     conn.close()
 
 
@@ -597,6 +652,7 @@ def actualizar_amortizacion(vehiculo_id: str, amortizacion: float):
         WHERE id = ?
     """, (amortizacion, vehiculo_id))
     conn.commit()
+    _sync_if_turso(conn)
     conn.close()
 
 
@@ -609,6 +665,7 @@ def agregar_regla(patron: str, categoria_id: str, vehiculo_id: Optional[str] = N
         VALUES (?, ?, ?, 1)
     """, (patron, categoria_id, vehiculo_id))
     conn.commit()
+    _sync_if_turso(conn)
     conn.close()
 
 
@@ -618,6 +675,7 @@ def eliminar_regla(regla_id: int):
     cursor = conn.cursor()
     cursor.execute("UPDATE reglas SET activa = 0 WHERE id = ?", (regla_id,))
     conn.commit()
+    _sync_if_turso(conn)
     conn.close()
 
 
@@ -658,6 +716,7 @@ def guardar_amortizaciones(amortizaciones: list[dict]):
         ))
 
     conn.commit()
+    _sync_if_turso(conn)
     conn.close()
 
 
@@ -686,6 +745,7 @@ def inicializar_amortizaciones_default():
             """, a)
 
         conn.commit()
+        _sync_if_turso(conn)
 
     conn.close()
 
@@ -743,6 +803,7 @@ def insertar_coste_laboral(coste: dict) -> int:
 
     coste_id = cursor.lastrowid
     conn.commit()
+    _sync_if_turso(conn)
     conn.close()
 
     return coste_id
@@ -772,6 +833,7 @@ def insertar_costes_laborales_batch(costes: list[dict]) -> int:
         ))
 
     conn.commit()
+    _sync_if_turso(conn)
     conn.close()
 
     return len(costes)
@@ -799,6 +861,7 @@ def eliminar_coste_laboral(coste_id: int):
     cursor = conn.cursor()
     cursor.execute("DELETE FROM costes_laborales WHERE id = ?", (coste_id,))
     conn.commit()
+    _sync_if_turso(conn)
     conn.close()
 
 
@@ -817,6 +880,7 @@ def eliminar_movimientos(ids: list[int]) -> int:
 
     deleted = cursor.rowcount
     conn.commit()
+    _sync_if_turso(conn)
     conn.close()
 
     return deleted
@@ -948,6 +1012,7 @@ def insertar_facturacion(factura: dict) -> int:
 
     factura_id = cursor.lastrowid
     conn.commit()
+    _sync_if_turso(conn)
     conn.close()
 
     return factura_id
@@ -959,6 +1024,7 @@ def eliminar_facturacion(factura_id: int):
     cursor = conn.cursor()
     cursor.execute("DELETE FROM facturacion WHERE id = ?", (factura_id,))
     conn.commit()
+    _sync_if_turso(conn)
     conn.close()
 
 
@@ -993,6 +1059,7 @@ def insertar_importacion_tipada(archivo_nombre, num_movimientos, periodo_desde,
           tipo, hash_archivo, mes_referencia))
     importacion_id = cursor.lastrowid
     conn.commit()
+    _sync_if_turso(conn)
     conn.close()
     return importacion_id
 
@@ -1007,7 +1074,12 @@ def verificar_hash_duplicado(hash_archivo):
     )
     resultado = cursor.fetchone()
     conn.close()
-    return dict(resultado) if resultado else None
+    if resultado is None:
+        return None
+    # Compatibilidad libsql (tupla) y sqlite3 (Row)
+    if hasattr(resultado, 'keys'):
+        return dict(resultado)
+    return {'id': resultado[0], 'archivo_nombre': resultado[1], 'fecha_importacion': resultado[2]}
 
 
 def verificar_nombre_duplicado(archivo_nombre):
@@ -1020,7 +1092,12 @@ def verificar_nombre_duplicado(archivo_nombre):
     )
     resultado = cursor.fetchone()
     conn.close()
-    return dict(resultado) if resultado else None
+    if resultado is None:
+        return None
+    # Compatibilidad libsql (tupla) y sqlite3 (Row)
+    if hasattr(resultado, 'keys'):
+        return dict(resultado)
+    return {'id': resultado[0], 'archivo_nombre': resultado[1], 'fecha_importacion': resultado[2]}
 
 
 def get_importaciones_por_mes(mes_referencia):
@@ -1055,6 +1132,7 @@ def upsert_checklist_documento(mes, tipo_documento, estado, notas=None):
         VALUES (?, ?, ?, ?)
     """, (mes, tipo_documento, estado, notas))
     conn.commit()
+    _sync_if_turso(conn)
     conn.close()
 
 
@@ -1082,6 +1160,7 @@ def guardar_exclusion_banco(patron, categoria_id, motivo, activa=1):
         VALUES (?, ?, ?, ?)
     """, (patron.strip().upper(), categoria_id, motivo, activa))
     conn.commit()
+    _sync_if_turso(conn)
     conn.close()
 
 
@@ -1091,6 +1170,7 @@ def eliminar_exclusion_banco(exclusion_id):
     cursor = conn.cursor()
     cursor.execute("DELETE FROM exclusiones_banco WHERE id = ?", (exclusion_id,))
     conn.commit()
+    _sync_if_turso(conn)
     conn.close()
 
 
@@ -1100,6 +1180,7 @@ def toggle_exclusion_banco(exclusion_id, activa):
     cursor = conn.cursor()
     cursor.execute("UPDATE exclusiones_banco SET activa = ? WHERE id = ?", (1 if activa else 0, exclusion_id))
     conn.commit()
+    _sync_if_turso(conn)
     conn.close()
 
 
@@ -1124,6 +1205,7 @@ def insertar_movimientos_excluidos(excluidos: list, importacion_id=None, mes_ref
             mes_referencia or exc.get('mes_referencia'),
         ))
     conn.commit()
+    _sync_if_turso(conn)
     conn.close()
 
 
@@ -1188,6 +1270,7 @@ def insertar_hoja_ruta(datos: dict) -> int:
     ))
 
     conn.commit()
+    _sync_if_turso(conn)
     num = cursor.lastrowid
     conn.close()
     return num
@@ -1222,7 +1305,11 @@ def get_km_por_vehiculo_mes(vehiculo_id: str, mes: str) -> float:
     """, (vehiculo_id, mes))
     row = cursor.fetchone()
     conn.close()
-    return float(row['km']) if row else 0.0
+    if row is None:
+        return 0.0
+    # Compatibilidad libsql (tupla) y sqlite3 (Row)
+    km_value = row['km'] if hasattr(row, 'keys') else row[0]
+    return float(km_value)
 
 
 def get_km_totales_vehiculo(vehiculo_id: str) -> pd.DataFrame:
