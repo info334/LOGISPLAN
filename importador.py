@@ -9,7 +9,7 @@ from datetime import datetime
 from typing import Optional, Union
 import unicodedata
 
-from database import get_reglas, get_connection, get_exclusiones_banco
+from database import get_reglas, get_connection, get_exclusiones_banco, read_sql
 
 
 def _normalizar_texto(texto: str) -> str:
@@ -355,7 +355,7 @@ def detectar_duplicados(df: pd.DataFrame) -> pd.DataFrame:
     fecha_max = str(df['fecha'].max())
 
     conn = get_connection()
-    existentes = pd.read_sql_query("""
+    existentes = read_sql("""
         SELECT fecha, descripcion, importe
         FROM movimientos
         WHERE fecha BETWEEN ? AND ?

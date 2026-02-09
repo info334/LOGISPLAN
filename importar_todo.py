@@ -12,7 +12,7 @@ import pdfplumber
 from io import BytesIO
 
 from database import (
-    get_connection, insertar_movimientos, insertar_costes_laborales_batch,
+    get_connection, read_sql, insertar_movimientos, insertar_costes_laborales_batch,
     insertar_importacion_tipada, verificar_hash_duplicado, verificar_nombre_duplicado,
     get_importaciones_por_mes, upsert_checklist_documento,
     insertar_movimientos_excluidos, get_movimientos_excluidos
@@ -291,7 +291,7 @@ def obtener_estado_checklist_mes(mes: str) -> list:
         fuente = tipo_info['fuente']
 
         if fuente == 'importaciones':
-            df = pd.read_sql_query("""
+            df = read_sql("""
                 SELECT fecha_importacion, num_movimientos
                 FROM importaciones
                 WHERE mes_referencia = ? AND tipo = ?
@@ -302,7 +302,7 @@ def obtener_estado_checklist_mes(mes: str) -> list:
                 item['fecha_importacion'] = df.iloc[0]['fecha_importacion']
 
         elif fuente == 'costes_laborales':
-            df = pd.read_sql_query("""
+            df = read_sql("""
                 SELECT COUNT(*) as cnt, SUM(coste_total) as total
                 FROM costes_laborales WHERE mes = ?
             """, conn, params=[mes])
@@ -311,7 +311,7 @@ def obtener_estado_checklist_mes(mes: str) -> list:
                 item['importe'] = float(df.iloc[0]['total']) if df.iloc[0]['total'] else 0
 
         elif fuente == 'hojas_ruta':
-            df = pd.read_sql_query("""
+            df = read_sql("""
                 SELECT COUNT(DISTINCT vehiculo_id) as cnt, SUM(km) as total_km
                 FROM hojas_ruta
                 WHERE mes = ? AND zona != 'TOTAL'
@@ -332,7 +332,7 @@ def obtener_estado_checklist_mes(mes: str) -> list:
             else:
                 fecha_hasta = f"{year}-{month_num + 1:02d}-01"
 
-            df = pd.read_sql_query("""
+            df = read_sql("""
                 SELECT COUNT(*) as cnt, SUM(ABS(importe)) as total
                 FROM movimientos
                 WHERE categoria_id = ? AND fecha >= ? AND fecha < ?
@@ -342,7 +342,7 @@ def obtener_estado_checklist_mes(mes: str) -> list:
                 item['importe'] = float(df.iloc[0]['total']) if df.iloc[0]['total'] else 0
 
         # Override manual desde checklist_documentos
-        df_manual = pd.read_sql_query("""
+        df_manual = read_sql("""
             SELECT estado FROM checklist_documentos
             WHERE mes = ? AND tipo_documento = ?
         """, conn, params=[mes, tipo_key])
@@ -363,7 +363,7 @@ def obtener_estado_checklist_mes(mes: str) -> list:
         'VALCARCE': 'FACTURA_VALCARCE_PEAJES',
     }
 
-    df_excluidos = pd.read_sql_query("""
+    df_excluidos = read_sql("""
         SELECT patron_exclusion, COUNT(*) as cnt, SUM(ABS(importe)) as total
         FROM movimientos_excluidos
         WHERE mes_referencia = ?

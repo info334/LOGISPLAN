@@ -1,0 +1,11 @@
+# Base de datos SQLite (se recrea automáticamente al iniciar)
+data/logisplan.db
+data/*.db-journal
+data/*.db-wal
+data/*.db-shm
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.DS_Store

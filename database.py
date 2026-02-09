@@ -70,6 +70,38 @@ def _sync_if_turso(conn):
         conn.sync()
 
 
+def _is_libsql(conn) -> bool:
+    """Detecta si la conexión es libsql (no compatible con pd.read_sql_query)."""
+    return HAS_LIBSQL and not isinstance(conn, sqlite3.Connection)
+
+
+def read_sql(query: str, conn, params=None) -> pd.DataFrame:
+    """
+    Wrapper compatible con sqlite3 y libsql para ejecutar queries SQL.
+    pd.read_sql_query no funciona con conexiones libsql, así que
+    usamos cursor.execute + fetchall como fallback.
+    """
+    if _is_libsql(conn):
+        cursor = conn.cursor()
+        if params:
+            cursor.execute(query, params)
+        else:
+            cursor.execute(query)
+        rows = cursor.fetchall()
+        if not rows:
+            # Extraer nombres de columnas de la descripción del cursor
+            col_names = [desc[0] for desc in cursor.description] if cursor.description else []
+            return pd.DataFrame(columns=col_names)
+        # libsql rows pueden ser tuplas o dicts según la versión
+        if hasattr(rows[0], 'keys'):
+            return pd.DataFrame([dict(r) for r in rows])
+        else:
+            col_names = [desc[0] for desc in cursor.description] if cursor.description else []
+            return pd.DataFrame(rows, columns=col_names)
+    else:
+        return pd.read_sql_query(query, conn, params=params)
+
+
 def init_database():
     """Inicializa las tablas de la base de datos."""
     conn = get_connection()
@@ -415,7 +447,7 @@ def _insertar_datos_iniciales(conn):
 def get_vehiculos() -> pd.DataFrame:
     """Obtiene todos los vehículos."""
     conn = get_connection()
-    df = pd.read_sql_query("SELECT * FROM vehiculos", conn)
+    df = read_sql("SELECT * FROM vehiculos", conn)
     conn.close()
     return df
 
@@ -423,7 +455,7 @@ def get_vehiculos() -> pd.DataFrame:
 def get_vehiculos_operativos() -> pd.DataFrame:
     """Obtiene vehículos operativos (sin COMÚN)."""
     conn = get_connection()
-    df = pd.read_sql_query(
+    df = read_sql(
         "SELECT * FROM vehiculos WHERE id != 'COMÚN'", conn
     )
     conn.close()
@@ -433,7 +465,7 @@ def get_vehiculos_operativos() -> pd.DataFrame:
 def get_categorias() -> pd.DataFrame:
     """Obtiene todas las categorías."""
     conn = get_connection()
-    df = pd.read_sql_query("SELECT * FROM categorias", conn)
+    df = read_sql("SELECT * FROM categorias", conn)
     conn.close()
     return df
 
@@ -441,7 +473,7 @@ def get_categorias() -> pd.DataFrame:
 def get_reglas() -> pd.DataFrame:
     """Obtiene todas las reglas de categorización."""
     conn = get_connection()
-    df = pd.read_sql_query("""
+    df = read_sql("""
         SELECT r.*, c.nombre as categoria_nombre
         FROM reglas r
         LEFT JOIN categorias c ON r.categoria_id = c.id
@@ -492,7 +524,7 @@ def get_movimientos(
 
     query += " ORDER BY m.fecha DESC"
 
-    df = pd.read_sql_query(query, conn, params=params)
+    df = read_sql(query, conn, params=params)
     conn.close()
     return df
 
@@ -684,7 +716,7 @@ def eliminar_regla(regla_id: int):
 def get_amortizaciones() -> pd.DataFrame:
     """Obtiene todas las amortizaciones."""
     conn = get_connection()
-    df = pd.read_sql_query("""
+    df = read_sql("""
         SELECT a.*, v.descripcion as vehiculo_descripcion
         FROM amortizaciones a
         LEFT JOIN vehiculos v ON a.vehiculo_id = v.id
@@ -774,7 +806,7 @@ def get_costes_laborales(mes: Optional[str] = None, vehiculo_id: Optional[str] =
 
     query += " ORDER BY cl.mes DESC, cl.trabajador_id"
 
-    df = pd.read_sql_query(query, conn, params=params)
+    df = read_sql(query, conn, params=params)
     conn.close()
     return df
 
@@ -842,7 +874,7 @@ def insertar_costes_laborales_batch(costes: list[dict]) -> int:
 def get_resumen_costes_por_vehiculo() -> pd.DataFrame:
     """Obtiene resumen de costes laborales agrupados por mes y vehículo."""
     conn = get_connection()
-    df = pd.read_sql_query("""
+    df = read_sql("""
         SELECT
             mes,
             vehiculo_id,
@@ -959,7 +991,7 @@ def get_movimientos_con_filtros(
         LIMIT ? OFFSET ?
     """
 
-    df = pd.read_sql_query(data_query, conn, params=params + [limit, offset])
+    df = read_sql(data_query, conn, params=params + [limit, offset])
     conn.close()
 
     return df, total_count
@@ -989,7 +1021,7 @@ def get_facturacion(mes: Optional[str] = None, vehiculo_id: Optional[str] = None
 
     query += " ORDER BY f.mes DESC, f.vehiculo_id"
 
-    df = pd.read_sql_query(query, conn, params=params)
+    df = read_sql(query, conn, params=params)
     conn.close()
     return df
 
@@ -1031,7 +1063,7 @@ def eliminar_facturacion(factura_id: int):
 def get_resumen_facturacion_por_vehiculo() -> pd.DataFrame:
     """Obtiene resumen de facturación agrupado por mes y vehículo."""
     conn = get_connection()
-    df = pd.read_sql_query("""
+    df = read_sql("""
         SELECT
             mes,
             vehiculo_id,
@@ -1103,7 +1135,7 @@ def verificar_nombre_duplicado(archivo_nombre):
 def get_importaciones_por_mes(mes_referencia):
     """Obtiene todas las importaciones de un mes específico."""
     conn = get_connection()
-    df = pd.read_sql_query("""
+    df = read_sql("""
         SELECT * FROM importaciones
         WHERE mes_referencia = ?
         ORDER BY fecha_importacion DESC
@@ -1115,7 +1147,7 @@ def get_importaciones_por_mes(mes_referencia):
 def get_checklist_estado(mes):
     """Obtiene el estado del checklist manual para un mes."""
     conn = get_connection()
-    df = pd.read_sql_query("""
+    df = read_sql("""
         SELECT * FROM checklist_documentos
         WHERE mes = ?
     """, conn, params=[mes])
@@ -1141,7 +1173,7 @@ def upsert_checklist_documento(mes, tipo_documento, estado, notas=None):
 def get_exclusiones_banco() -> pd.DataFrame:
     """Obtiene todas las exclusiones bancarias (activas e inactivas)."""
     conn = get_connection()
-    df = pd.read_sql_query("""
+    df = read_sql("""
         SELECT e.*, c.nombre as categoria_nombre
         FROM exclusiones_banco e
         LEFT JOIN categorias c ON e.categoria_id = c.id
@@ -1213,13 +1245,13 @@ def get_movimientos_excluidos(mes_referencia=None) -> pd.DataFrame:
     """Obtiene movimientos excluidos con filtro opcional por mes."""
     conn = get_connection()
     if mes_referencia:
-        df = pd.read_sql_query("""
+        df = read_sql("""
             SELECT * FROM movimientos_excluidos
             WHERE mes_referencia = ?
             ORDER BY fecha DESC
         """, conn, params=[mes_referencia])
     else:
-        df = pd.read_sql_query("""
+        df = read_sql("""
             SELECT * FROM movimientos_excluidos
             ORDER BY created_at DESC
         """, conn)
@@ -1290,7 +1322,7 @@ def get_hojas_ruta(mes=None, vehiculo_id=None) -> pd.DataFrame:
         params.append(vehiculo_id)
 
     query += " ORDER BY mes DESC, vehiculo_id, zona"
-    df = pd.read_sql_query(query, conn, params=params)
+    df = read_sql(query, conn, params=params)
     conn.close()
     return df
 
@@ -1315,7 +1347,7 @@ def get_km_por_vehiculo_mes(vehiculo_id: str, mes: str) -> float:
 def get_km_totales_vehiculo(vehiculo_id: str) -> pd.DataFrame:
     """Obtiene km mensuales de un vehículo (solo filas TOTAL)."""
     conn = get_connection()
-    df = pd.read_sql_query("""
+    df = read_sql("""
         SELECT mes, km, viajes, repartos, dias_trabajados, media_repartos_viaje
         FROM hojas_ruta
         WHERE vehiculo_id = ? AND zona = 'TOTAL'
