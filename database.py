@@ -206,25 +206,18 @@ def init_database():
     """)
 
     # Índice único compuesto para evitar duplicados en movimientos
-    # Primero limpiar duplicados existentes para que el índice se pueda crear
+    # Si hay duplicados existentes, NO borrar datos — solo omitir el índice.
+    # El usuario puede limpiar duplicados manualmente desde Configuración.
+    # INSERT OR IGNORE funciona igualmente gracias al índice cuando se pueda crear.
     try:
         cursor.execute("""
             CREATE UNIQUE INDEX IF NOT EXISTS idx_movimientos_unique
             ON movimientos(fecha, descripcion, importe)
         """)
     except sqlite3.IntegrityError:
-        # Hay duplicados existentes: limpiar y reintentar
-        cursor.execute("""
-            DELETE FROM movimientos
-            WHERE id NOT IN (
-                SELECT MIN(id) FROM movimientos
-                GROUP BY fecha, descripcion, importe
-            )
-        """)
-        cursor.execute("""
-            CREATE UNIQUE INDEX IF NOT EXISTS idx_movimientos_unique
-            ON movimientos(fecha, descripcion, importe)
-        """)
+        # Hay duplicados existentes, no se puede crear el índice aún.
+        # No borrar datos automáticamente para evitar pérdida de información.
+        pass
 
     # Índices para mejorar rendimiento
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_movimientos_fecha ON movimientos(fecha)")
@@ -494,18 +487,34 @@ def insertar_movimientos(movimientos: list[dict], archivo_nombre: str = None,
 
     importacion_id = cursor.lastrowid
 
-    # Insertar movimientos con INSERT OR IGNORE para evitar duplicados
+    # Verificar si el índice único existe (puede no existir si había duplicados previos)
+    cursor.execute("SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_movimientos_unique'")
+    tiene_indice = cursor.fetchone()[0] > 0
+
+    # Insertar movimientos evitando duplicados
     insertados = 0
     duplicados = 0
     for mov in movimientos:
+        fecha = mov.get('fecha')
+        descripcion = mov.get('descripcion')
+        importe = mov.get('importe')
+
+        # Si no hay índice único, verificar manualmente si ya existe
+        if not tiene_indice:
+            cursor.execute("""
+                SELECT COUNT(*) FROM movimientos
+                WHERE fecha = ? AND descripcion = ? AND importe = ?
+            """, (fecha, descripcion, importe))
+            if cursor.fetchone()[0] > 0:
+                duplicados += 1
+                continue
+
         cursor.execute("""
             INSERT OR IGNORE INTO movimientos
             (fecha, descripcion, importe, categoria_id, vehiculo_id, referencia, importacion_id)
             VALUES (?, ?, ?, ?, ?, ?, ?)
         """, (
-            mov.get('fecha'),
-            mov.get('descripcion'),
-            mov.get('importe'),
+            fecha, descripcion, importe,
             mov.get('categoria_id'),
             mov.get('vehiculo_id'),
             mov.get('referencia'),
@@ -525,6 +534,7 @@ def insertar_movimientos(movimientos: list[dict], archivo_nombre: str = None,
 def limpiar_duplicados_existentes() -> int:
     """
     Elimina movimientos duplicados existentes, conservando el de menor ID.
+    Después intenta crear el UNIQUE INDEX si no existía.
     Retorna el número de duplicados eliminados.
     """
     conn = get_connection()
@@ -537,6 +547,16 @@ def limpiar_duplicados_existentes() -> int:
         )
     """)
     eliminados = cursor.rowcount
+
+    # Intentar crear el índice único ahora que no hay duplicados
+    try:
+        cursor.execute("""
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_movimientos_unique
+            ON movimientos(fecha, descripcion, importe)
+        """)
+    except sqlite3.IntegrityError:
+        pass  # Todavía hay conflictos, no pasa nada
+
     conn.commit()
     conn.close()
     return eliminados
