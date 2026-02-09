@@ -205,6 +205,12 @@ def init_database():
         )
     """)
 
+    # Índice único compuesto para evitar duplicados en movimientos
+    cursor.execute("""
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_movimientos_unique
+        ON movimientos(fecha, descripcion, importe)
+    """)
+
     # Índices para mejorar rendimiento
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_movimientos_fecha ON movimientos(fecha)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_movimientos_vehiculo ON movimientos(vehiculo_id)")
@@ -450,10 +456,11 @@ def get_periodos_disponibles() -> list:
 
 def insertar_movimientos(movimientos: list[dict], archivo_nombre: str = None,
                          tipo: str = None, hash_archivo: str = None,
-                         mes_referencia: str = None) -> int:
+                         mes_referencia: str = None) -> dict:
     """
     Inserta múltiples movimientos en la base de datos.
-    Retorna el ID de la importación.
+    Usa INSERT OR IGNORE para evitar duplicados (basado en fecha+descripcion+importe).
+    Retorna dict con: importacion_id, insertados, duplicados.
     """
     conn = get_connection()
     cursor = conn.cursor()
@@ -472,10 +479,13 @@ def insertar_movimientos(movimientos: list[dict], archivo_nombre: str = None,
 
     importacion_id = cursor.lastrowid
 
-    # Insertar movimientos
+    # Insertar movimientos con INSERT OR IGNORE para evitar duplicados
+    insertados = 0
+    duplicados = 0
     for mov in movimientos:
         cursor.execute("""
-            INSERT INTO movimientos (fecha, descripcion, importe, categoria_id, vehiculo_id, referencia, importacion_id)
+            INSERT OR IGNORE INTO movimientos
+            (fecha, descripcion, importe, categoria_id, vehiculo_id, referencia, importacion_id)
             VALUES (?, ?, ?, ?, ?, ?, ?)
         """, (
             mov.get('fecha'),
@@ -486,11 +496,35 @@ def insertar_movimientos(movimientos: list[dict], archivo_nombre: str = None,
             mov.get('referencia'),
             importacion_id
         ))
+        if cursor.rowcount > 0:
+            insertados += 1
+        else:
+            duplicados += 1
 
     conn.commit()
     conn.close()
 
-    return importacion_id
+    return {'importacion_id': importacion_id, 'insertados': insertados, 'duplicados': duplicados}
+
+
+def limpiar_duplicados_existentes() -> int:
+    """
+    Elimina movimientos duplicados existentes, conservando el de menor ID.
+    Retorna el número de duplicados eliminados.
+    """
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("""
+        DELETE FROM movimientos
+        WHERE id NOT IN (
+            SELECT MIN(id) FROM movimientos
+            GROUP BY fecha, descripcion, importe
+        )
+    """)
+    eliminados = cursor.rowcount
+    conn.commit()
+    conn.close()
+    return eliminados
 
 
 def actualizar_movimiento(id: int, categoria_id: str, vehiculo_id: str):

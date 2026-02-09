@@ -605,15 +605,18 @@ def _ejecutar_importacion(seleccionados):
                 parsed = item['parsed_data']
                 if parsed and 'df' in parsed:
                     movimientos = preparar_para_guardado(parsed['df'])
-                    imp_id = insertar_movimientos(
+                    resultado = insertar_movimientos(
                         movimientos, item['nombre'],
                         tipo=tipo, hash_archivo=item['hash'], mes_referencia=mes
                     )
+                    imp_id = resultado['importacion_id']
                     # Registrar movimientos excluidos
                     excluidos_log = parsed.get('excluidos', [])
                     if excluidos_log:
                         insertar_movimientos_excluidos(excluidos_log, importacion_id=imp_id, mes_referencia=mes)
                     exitos += 1
+                    if resultado['duplicados'] > 0:
+                        st.warning(f"⚠️ {item['nombre']}: {resultado['duplicados']} duplicados ignorados")
                 else:
                     errores.append(f"{item['nombre']}: Sin datos parseados")
 
@@ -623,11 +626,13 @@ def _ejecutar_importacion(seleccionados):
                 if parsed and parsed.get('resumen_vehiculos'):
                     movs = generar_movimientos_para_db(parsed)
                     if movs:
-                        insertar_movimientos(
+                        resultado = insertar_movimientos(
                             movs, item['nombre'],
                             tipo=tipo, hash_archivo=item['hash'], mes_referencia=mes
                         )
                         exitos += 1
+                        if resultado['duplicados'] > 0:
+                            st.warning(f"⚠️ {item['nombre']}: {resultado['duplicados']} duplicados ignorados")
                     else:
                         errores.append(f"{item['nombre']}: No se generaron movimientos")
                 else:

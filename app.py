@@ -16,7 +16,8 @@ from database import (
     eliminar_movimientos, get_movimientos_con_filtros,
     get_facturacion, insertar_facturacion, eliminar_facturacion,
     get_exclusiones_banco, guardar_exclusion_banco, eliminar_exclusion_banco,
-    toggle_exclusion_banco, insertar_movimientos_excluidos
+    toggle_exclusion_banco, insertar_movimientos_excluidos,
+    limpiar_duplicados_existentes
 )
 from importador import (
     parsear_csv_abanca, auto_categorizar, preparar_para_guardado,
@@ -515,7 +516,8 @@ def pagina_importar():
                 if gastos_sin_vehiculo:
                     st.error(f"Hay {len(gastos_sin_vehiculo)} gastos sin vehículo asignado.")
                 else:
-                    importacion_id = insertar_movimientos(movimientos_finales, archivo.name if archivo else "manual")
+                    resultado = insertar_movimientos(movimientos_finales, archivo.name if archivo else "manual")
+                    importacion_id = resultado['importacion_id']
 
                     # Registrar movimientos excluidos en log (auto-exclusiones + skips manuales)
                     excluidos_log = st.session_state.get('excluidos_importacion', [])
@@ -539,15 +541,16 @@ def pagina_importar():
                     n_auto = len(excluidos_log)
                     n_manual = len(skips_manuales)
                     n_total_excluidos = n_auto + n_manual
-                    msg = f"✅ Importacion #{importacion_id} guardada. {len(movimientos_finales)} movimientos."
+                    st.success(f"✅ {resultado['insertados']} movimientos insertados")
+                    if resultado['duplicados'] > 0:
+                        st.warning(f"⚠️ {resultado['duplicados']} duplicados ignorados")
                     if n_total_excluidos > 0:
                         partes = []
                         if n_auto > 0:
                             partes.append(f"{n_auto} por regla")
                         if n_manual > 0:
                             partes.append(f"{n_manual} manuales")
-                        msg += f" {n_total_excluidos} saltados ({', '.join(partes)})."
-                    st.success(msg)
+                        st.info(f"⏭️ {n_total_excluidos} saltados ({', '.join(partes)})")
 
                     # Limpiar estado
                     st.session_state.df_importacion = None
@@ -623,17 +626,60 @@ def crear_gauge_rentabilidad(valor, titulo, max_valor=30):
 def calcular_rentabilidad_vehiculo(vehiculo_id: str = None):
     """
     Calcula la rentabilidad de un vehículo o total.
+    Fórmula: margen = (facturacion - gastos_totales) / facturacion * 100
+    Donde gastos_totales = gastos_directos + (gastos_comunes / num_vehiculos) + amortizacion
+
     Retorna: facturacion, resultado_neto, margen_pct, periodo
     """
-    # Obtener facturación
+    vehiculos_operativos = ["MTY", "LVX", "MJC", "MLB"]
+    num_vehiculos = len(vehiculos_operativos)
+
+    # Obtener facturación desde tabla de facturacion
     df_fact = get_facturacion(vehiculo_id=vehiculo_id) if vehiculo_id else get_facturacion()
     facturacion_total = df_fact['importe'].sum() if len(df_fact) > 0 else 0
 
-    # Obtener P&L
-    df_pnl = calcular_pnl_vehiculo(vehiculo_id)
-    resultado_neto = df_pnl['neto'].sum() if len(df_pnl) > 0 else 0
+    # Obtener gastos directos del vehículo (movimientos con importe < 0)
+    if vehiculo_id:
+        movimientos_veh = get_movimientos(vehiculo_id=vehiculo_id)
+        gastos_directos = abs(movimientos_veh[movimientos_veh['importe'] < 0]['importe'].sum()) if len(movimientos_veh) > 0 else 0
 
-    # Calcular margen
+        # Gastos comunes prorrateados
+        movimientos_comun = get_movimientos(vehiculo_id='COMÚN')
+        gastos_comunes = abs(movimientos_comun[movimientos_comun['importe'] < 0]['importe'].sum()) if len(movimientos_comun) > 0 else 0
+        gastos_comunes_prorrateados = gastos_comunes / num_vehiculos
+
+        # Amortización del vehículo
+        df_amort = get_amortizaciones()
+        if len(df_amort) > 0:
+            amort_veh = df_amort[df_amort['vehiculo_id'] == vehiculo_id]['amortizacion_mensual'].sum()
+            amort_comun = df_amort[df_amort['vehiculo_id'] == 'COMÚN']['amortizacion_mensual'].sum()
+            # Contar meses con datos
+            if len(movimientos_veh) > 0:
+                meses_datos = pd.to_datetime(movimientos_veh['fecha']).dt.to_period('M').nunique()
+            else:
+                meses_datos = 1
+            amortizacion = (amort_veh + amort_comun / num_vehiculos) * meses_datos
+        else:
+            amortizacion = 0
+
+        gastos_totales = gastos_directos + gastos_comunes_prorrateados + amortizacion
+    else:
+        # Total empresa: todos los gastos + todas las amortizaciones
+        movimientos_todos = get_movimientos()
+        gastos_totales_mov = abs(movimientos_todos[movimientos_todos['importe'] < 0]['importe'].sum()) if len(movimientos_todos) > 0 else 0
+
+        df_amort = get_amortizaciones()
+        if len(df_amort) > 0 and len(movimientos_todos) > 0:
+            amort_mensual_total = df_amort['amortizacion_mensual'].sum()
+            meses_datos = pd.to_datetime(movimientos_todos['fecha']).dt.to_period('M').nunique()
+            amortizacion = amort_mensual_total * meses_datos
+        else:
+            amortizacion = 0
+
+        gastos_totales = gastos_totales_mov + amortizacion
+
+    # Calcular resultado neto y margen
+    resultado_neto = facturacion_total - gastos_totales
     if facturacion_total > 0:
         margen_pct = (resultado_neto / facturacion_total) * 100
     else:
@@ -641,12 +687,12 @@ def calcular_rentabilidad_vehiculo(vehiculo_id: str = None):
 
     # Calcular periodo
     periodo = "Sin datos"
+    df_pnl = calcular_pnl_vehiculo(vehiculo_id)
     if len(df_pnl) > 0:
         meses = df_pnl['mes'].sort_values()
         mes_inicio = meses.iloc[0] if len(meses) > 0 else ""
         mes_fin = meses.iloc[-1] if len(meses) > 0 else ""
         if mes_inicio and mes_fin:
-            # Formatear: 2025-01 -> Ene 2025
             meses_nombres = ['Ene', 'Feb', 'Mar', 'Abr', 'May', 'Jun',
                            'Jul', 'Ago', 'Sep', 'Oct', 'Nov', 'Dic']
             try:
@@ -911,10 +957,11 @@ def mostrar_tab_vehiculo(vehiculo_id: str, vehiculo_desc: str):
         st.info(f"No hay movimientos para {vehiculo_id}")
         return
 
-    # Métricas totales del vehículo
-    total_ingresos = df_pnl['ingresos'].sum()
+    # Métricas totales del vehículo - usar facturación de tabla facturacion
+    df_fact_veh = get_facturacion(vehiculo_id=vehiculo_id)
+    total_facturacion = df_fact_veh['importe'].sum() if len(df_fact_veh) > 0 else 0
     total_gastos = df_pnl['gastos'].sum()
-    total_neto = df_pnl['neto'].sum()
+    total_neto = total_facturacion + total_gastos  # gastos ya son negativos
 
     # Datos de kilómetros (hojas de ruta)
     from database import get_km_totales_vehiculo
@@ -927,13 +974,13 @@ def mostrar_tab_vehiculo(vehiculo_id: str, vehiculo_desc: str):
         col_m1, col_m2, col_m3 = st.columns(3)
 
     with col_m1:
-        st.metric("Total Ingresos", formato_importe_es(total_ingresos))
+        st.metric("Facturación", formato_importe_es(total_facturacion))
     with col_m2:
         st.metric("Total Gastos", formato_importe_es(abs(total_gastos)))
     with col_m3:
         delta_color = "normal" if total_neto >= 0 else "inverse"
         st.metric("Resultado Neto", formato_importe_es(total_neto),
-                 delta=f"{(total_neto/total_ingresos*100):.1f}% margen" if total_ingresos > 0 else None,
+                 delta=f"{(total_neto/total_facturacion*100):.1f}% margen" if total_facturacion > 0 else None,
                  delta_color=delta_color)
 
     if total_km > 0:
@@ -1009,20 +1056,21 @@ def mostrar_tab_totales():
     # Calcular P&L total
     df_pnl_total = calcular_pnl_vehiculo(None)
 
-    # Métricas globales
-    total_ingresos = df_pnl_total['ingresos'].sum()
+    # Métricas globales - usar facturación de tabla facturacion
+    df_fact_total = get_facturacion()
+    total_facturacion = df_fact_total['importe'].sum() if len(df_fact_total) > 0 else 0
     total_gastos = df_pnl_total['gastos'].sum()
-    total_neto = df_pnl_total['neto'].sum()
+    total_neto = total_facturacion + total_gastos  # gastos ya son negativos
 
     col_m1, col_m2, col_m3 = st.columns(3)
     with col_m1:
-        st.metric("Total Ingresos", formato_importe_es(total_ingresos))
+        st.metric("Facturación Total", formato_importe_es(total_facturacion))
     with col_m2:
         st.metric("Total Gastos", formato_importe_es(abs(total_gastos)))
     with col_m3:
         delta_color = "normal" if total_neto >= 0 else "inverse"
         st.metric("Resultado Neto", formato_importe_es(total_neto),
-                 delta=f"{(total_neto/total_ingresos*100):.1f}% margen" if total_ingresos > 0 else None,
+                 delta=f"{(total_neto/total_facturacion*100):.1f}% margen" if total_facturacion > 0 else None,
                  delta_color=delta_color)
 
     st.markdown("---")
@@ -1039,14 +1087,21 @@ def mostrar_tab_totales():
     resumen_vehiculos = []
 
     for _, veh in vehiculos.iterrows():
-        df_veh = calcular_pnl_vehiculo(veh['id'])
-        if len(df_veh) > 0:
+        veh_id = veh['id']
+        # Usar facturación de la tabla facturacion en vez de ingresos bancarios
+        df_fact_veh = get_facturacion(vehiculo_id=veh_id)
+        facturacion_veh = df_fact_veh['importe'].sum() if len(df_fact_veh) > 0 else 0
+
+        df_veh = calcular_pnl_vehiculo(veh_id)
+        gastos_veh = abs(df_veh['gastos'].sum()) if len(df_veh) > 0 else 0
+
+        if facturacion_veh > 0 or gastos_veh > 0:
             resumen_vehiculos.append({
-                'Vehículo': veh['id'],
+                'Vehículo': veh_id,
                 'Descripción': veh['descripcion'],
-                'Ingresos': df_veh['ingresos'].sum(),
-                'Gastos': abs(df_veh['gastos'].sum()),
-                'Neto': df_veh['neto'].sum()
+                'Facturación': facturacion_veh,
+                'Gastos': gastos_veh,
+                'Neto': facturacion_veh - gastos_veh
             })
 
     if resumen_vehiculos:
@@ -1058,7 +1113,7 @@ def mostrar_tab_totales():
             with cols[i]:
                 color = "green" if row['Neto'] >= 0 else "red"
                 st.markdown(f"**{row['Vehículo']}**")
-                st.markdown(f"Ingresos: {formato_importe_es(row['Ingresos'])}")
+                st.markdown(f"Facturación: {formato_importe_es(row['Facturación'])}")
                 st.markdown(f"Gastos: {formato_importe_es(row['Gastos'])}")
                 st.markdown(f"<span style='color:{color}; font-weight:bold'>Neto: {formato_importe_es(row['Neto'])}</span>", unsafe_allow_html=True)
 
@@ -1066,7 +1121,7 @@ def mostrar_tab_totales():
 
         # Tabla comparativa
         df_tabla = df_resumen.copy()
-        df_tabla['Ingresos'] = df_tabla['Ingresos'].apply(formato_importe_es)
+        df_tabla['Facturación'] = df_tabla['Facturación'].apply(formato_importe_es)
         df_tabla['Gastos'] = df_tabla['Gastos'].apply(formato_importe_es)
         df_tabla['Neto'] = df_tabla['Neto'].apply(formato_importe_es)
 
@@ -1325,6 +1380,19 @@ def pagina_config():
                 st.rerun()
             else:
                 st.error("El patron no puede estar vacio")
+
+    # ---- Sección: Limpiar duplicados ----
+    st.markdown("---")
+    st.markdown("### 🧹 Limpiar duplicados existentes")
+    st.caption("Elimina movimientos duplicados que se hayan insertado antes de la protección automática. "
+               "Conserva el registro con el ID más bajo de cada grupo (fecha + descripción + importe).")
+
+    if st.button("🧹 Limpiar duplicados", type="secondary", use_container_width=False):
+        eliminados = limpiar_duplicados_existentes()
+        if eliminados > 0:
+            st.success(f"✅ {eliminados} movimientos duplicados eliminados")
+        else:
+            st.info("No se encontraron duplicados")
 
 
 # ============== PÁGINA: REGISTROS ==============
@@ -2157,12 +2225,14 @@ def pagina_facturas():
 
                 if movimientos_totales:
                     # Insertar en BD
-                    importacion_id = insertar_movimientos(
+                    resultado = insertar_movimientos(
                         movimientos_totales,
                         "Facturas combustible/peajes"
                     )
 
-                    st.success(f"✅ Guardados {len(movimientos_totales)} movimientos (Importación #{importacion_id})")
+                    st.success(f"✅ {resultado['insertados']} movimientos insertados")
+                    if resultado['duplicados'] > 0:
+                        st.warning(f"⚠️ {resultado['duplicados']} duplicados ignorados")
 
                     # Limpiar estado
                     st.session_state.facturas_procesadas = []
