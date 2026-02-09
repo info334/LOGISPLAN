@@ -81,12 +81,13 @@ def read_sql(query: str, conn, params=None) -> pd.DataFrame:
     pd.read_sql_query no funciona con conexiones libsql, así que
     usamos cursor.execute + fetchall como fallback.
     """
+    # Normalizar params: None o lista vacía -> tupla vacía
+    params = tuple(params) if params else ()
+
     if _is_libsql(conn):
         cursor = conn.cursor()
-        if params:
-            cursor.execute(query, params)
-        else:
-            cursor.execute(query)
+        # libsql siempre recibe params (aunque sea tupla vacía)
+        cursor.execute(query, params)
         rows = cursor.fetchall()
         if not rows:
             # Extraer nombres de columnas de la descripción del cursor
@@ -99,7 +100,11 @@ def read_sql(query: str, conn, params=None) -> pd.DataFrame:
             col_names = [desc[0] for desc in cursor.description] if cursor.description else []
             return pd.DataFrame(rows, columns=col_names)
     else:
-        return pd.read_sql_query(query, conn, params=params)
+        # sqlite3 con pandas
+        if params:
+            return pd.read_sql_query(query, conn, params=params)
+        else:
+            return pd.read_sql_query(query, conn)
 
 
 def init_database():
