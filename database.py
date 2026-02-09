@@ -206,10 +206,25 @@ def init_database():
     """)
 
     # Índice único compuesto para evitar duplicados en movimientos
-    cursor.execute("""
-        CREATE UNIQUE INDEX IF NOT EXISTS idx_movimientos_unique
-        ON movimientos(fecha, descripcion, importe)
-    """)
+    # Primero limpiar duplicados existentes para que el índice se pueda crear
+    try:
+        cursor.execute("""
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_movimientos_unique
+            ON movimientos(fecha, descripcion, importe)
+        """)
+    except sqlite3.IntegrityError:
+        # Hay duplicados existentes: limpiar y reintentar
+        cursor.execute("""
+            DELETE FROM movimientos
+            WHERE id NOT IN (
+                SELECT MIN(id) FROM movimientos
+                GROUP BY fecha, descripcion, importe
+            )
+        """)
+        cursor.execute("""
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_movimientos_unique
+            ON movimientos(fecha, descripcion, importe)
+        """)
 
     # Índices para mejorar rendimiento
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_movimientos_fecha ON movimientos(fecha)")
