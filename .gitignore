@@ -1,0 +1,25 @@
+# Base de datos SQLite (se recrea automáticamente al iniciar)
+data/logisplan.db
+data/*.db-journal
+data/*.db-wal
+data/*.db-shm
+
+# Configuración sensible (API Keys)
+data/holded_config.json
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.DS_Store
+
+# Node.js
+frontend/node_modules/
+frontend/.next/
+
+# Virtual env
+venv/
+
+# Environment
+.env
+.env.local
